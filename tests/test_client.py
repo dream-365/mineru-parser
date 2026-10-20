@@ -18,7 +18,7 @@ from mineru_parser import (
     MinerUTimeoutError,
     PollPolicy,
 )
-from mineru_parser.core import parse_retry_after
+from mineru_parser.client.transport import parse_retry_after
 
 # --- 测试替身 -------------------------------------------------------------
 
@@ -127,7 +127,7 @@ def test_submit_returns_task_handle_and_sends_expected_request():
     assert task.state is None
     assert task.result is None
     assert repr(task) == (
-        "MinerUTask(task_id='task-1', data_id='doc-1', state='unknown')"
+        "AsyncResult(task_id='task-1', data_id='doc-1', state='unknown')"
     )
 
     request = session.requests[0]
@@ -162,6 +162,17 @@ def test_invalid_uri_fails_before_http():
     assert session.requests == []
 
 
+def test_submit_with_empty_task_id_is_an_execution_error():
+    client, session, _ = make_client(
+        [FakeResponse({"code": 0, "msg": "ok", "data": {"task_id": "  "}})]
+    )
+
+    with pytest.raises(MinerUExecutionError, match="empty task id"):
+        client.submit("https://example.com/doc.pdf")
+
+    assert len(session.requests) == 1
+
+
 def test_task_resumes_from_persisted_id_without_submit():
     client, session, _ = make_client(
         [
@@ -175,7 +186,8 @@ def test_task_resumes_from_persisted_id_without_submit():
         ]
     )
 
-    task = client.task("task-9", data_id="doc-9")
+    task = client.resume("task-9", data_id="doc-9")
+    assert session.requests == []
     result = task.wait(timeout=10)
 
     assert result.provider_task_id == "task-9"
@@ -187,7 +199,7 @@ def test_task_resumes_from_persisted_id_without_submit():
 def test_task_id_is_url_encoded():
     client, session, _ = make_client([FakeResponse(done_ok(task_id="a/b"))])
 
-    client.task("a/b").wait(timeout=10)
+    client.resume("a/b").wait(timeout=10)
 
     assert session.requests[0]["url"].endswith("/extract/task/a%2Fb")
 
@@ -234,17 +246,6 @@ def test_wait_polls_until_done_and_notifies_on_state_and_progress():
     assert len(session.requests) == 5
     # 先推进 interval（3 * 1.5），再乘抖动因子（0.5 + 0.5 * 0.5）。
     assert runtime.sleeps[0] == pytest.approx(3.375)
-
-
-def test_parse_submits_and_waits():
-    client, session, _ = make_client(
-        [FakeResponse(submit_ok()), FakeResponse(done_ok())]
-    )
-
-    result = client.parse("https://example.com/doc.pdf", timeout=10)
-
-    assert result.zip_url == "https://cdn.example/result.zip"
-    assert [r["method"] for r in session.requests] == ["POST", "GET"]
 
 
 def test_wait_failed_raises_and_is_idempotent():
@@ -475,10 +476,10 @@ def test_unknown_state_is_retried_as_transient():
 
 def test_client_manages_its_own_session(monkeypatch):
     session = FakeSession([FakeResponse(submit_ok()), FakeResponse(done_ok())])
-    monkeypatch.setattr("mineru_parser.client.requests.Session", lambda: session)
+    monkeypatch.setattr("mineru_parser.client.api.requests.Session", lambda: session)
     client = MinerUApiClient(api_key="test-key")
 
-    result = client.parse("https://example.com/doc.pdf", timeout=10)
+    result = client.submit("https://example.com/doc.pdf").wait(timeout=10)
     client.close()
 
     assert result.zip_url == "https://cdn.example/result.zip"

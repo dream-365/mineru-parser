@@ -786,7 +786,7 @@ MinerUError
 | AC-1.6 | `test_invalid_configuration_is_rejected`（默认策略分支由实现保证） |
 | AC-2.1 ~ AC-2.3 | `test_submit_returns_task_handle_and_sends_expected_request`、`test_submit_omits_none_data_id` |
 | AC-2.4 | `test_invalid_uri_fails_before_http` |
-| AC-2.5 | 暂无独立测试（由 `MinerUTransport.submit` 空 ID 分支保证）；建议后续补充 |
+| AC-2.5 | `test_submit_with_empty_task_id_is_an_execution_error` |
 | AC-2.6 | `test_submit_returns_task_handle_and_sends_expected_request` |
 | AC-3.1 ~ AC-3.3 | `test_task_resumes_from_persisted_id_without_submit` |
 | AC-3.4 | `test_task_resumes_from_persisted_id_without_submit` |

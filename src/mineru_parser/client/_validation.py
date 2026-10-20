@@ -119,10 +119,10 @@ def validate_max_errors(value: int) -> int:
     return value
 
 
-def validate_task_id(provider_task_id: str) -> str:
-    if not isinstance(provider_task_id, str) or not provider_task_id.strip():
-        raise MinerUConfigurationError("provider_task_id must be a non-empty string.")
-    return provider_task_id.strip()
+def validate_task_id(task_id: str) -> str:
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise MinerUConfigurationError("task_id must be a non-empty string.")
+    return task_id.strip()
 
 
 def validate_deadline_epoch(value: float) -> float:

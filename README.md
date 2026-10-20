@@ -1,11 +1,11 @@
 # mineru-parser
 
-`mineru-parser` 把 MinerU 的异步文档解析流程封装成同步 Python 调用：传入 PDF 链接提交解析任务，客户端自动轮询进度，成功后返回结果包的下载地址。适合后端服务、批处理脚本和离线文档处理等需要“提交 → 等待 → 取结果”一条龙完成的场景。
+`mineru-parser` 把 MinerU 的异步文档解析流程封装成同步 Python 调用：传入 PDF 链接提交解析任务，调用方通过结果句柄等待进度，成功后返回结果包的下载地址。适合后端服务、批处理脚本和离线文档处理等需要“提交 → 等待 → 取结果”的场景。
 
 主要功能：
 
-- **提交并等待**：一次调用完成提交与等待，也可以先提交、稍后再等待；
-- **任务恢复**：持久化 `task_id` 后，可在之后的进程里恢复等待，不会重复提交任务；
+- **提交并等待**：`submit()` 返回 `AsyncResult`，由句柄的 `wait()` 完成等待；也可以先提交、稍后再等待；
+- **任务恢复**：持久化 `task_id` 后，可在之后的进程里通过 `resume()` 恢复等待，不会重复提交任务；
 - **稳健轮询**：自动处理指数退避、随机抖动、服务端 `Retry-After` 与连续错误上限，偶发故障不会立即中断；
 - **等待边界**：支持相对超时和绝对截止时间，超时异常携带最后已知的任务状态；
 - **进度回调**：状态或解析页数变化时触发回调，便于上报进度；
@@ -16,17 +16,14 @@
 from mineru_parser import MinerUApiClient
 
 with MinerUApiClient() as client:  # API Key 默认读取 MINERU_API_KEY
-    # 一步式：提交并等待完成
-    result = client.parse("https://example.com/paper.pdf")
+    # 提交解析任务，立即拿到可等待的结果句柄
+    submission = client.submit("https://example.com/paper.pdf", data_id="doc-42")
+    result = submission.wait(timeout=600, on_update=lambda s: print(s.state))
     print(result.zip_url)
 
-    # 或使用任务句柄：先提交，稍后等待
-    task = client.submit("https://example.com/paper.pdf", data_id="doc-42")
-    result = task.wait(timeout=600, on_update=lambda s: print(s.state))
-
-    # 恢复句柄：不发起网络请求
-    resumed = client.task(task.task_id)
-    result = resumed.wait()
+    # 进程重启后：从持久化的 task_id 恢复等待，不会重复提交
+    resumed = client.resume(submission.task_id)
+    result = resumed.wait(timeout=600)
 ```
 
 结果只提供 MinerU 返回的 `zip_url`，下载与解压由调用方处理。
@@ -56,7 +53,7 @@ flowchart LR
 
         subgraph CLIENTBOX["MinerUApiClient｜配置 + 任务工厂"]
             direction TB
-            CLIENT["职责<br/>• 凭证 / base_url / timeout<br/>• Session 生命周期（连接池共享）<br/>• submit · trace · task · parse<br/>• 按 PollPolicy 创建 Poller"]:::clientStyle
+            CLIENT["职责<br/>• 凭证 / base_url / timeout<br/>• Session 生命周期（连接池共享）<br/>• submit · resume · 内部状态查询<br/>• 按 PollPolicy 创建 Poller"]:::clientStyle
             CLIENT_X["边界<br/>• 不保存任务状态<br/>• 不执行轮询 / 等待<br/>• 不解释任务终态<br/>• data_id 仅用于对账，不是幂等键"]:::boundaryStyle
         end
 
@@ -66,7 +63,7 @@ flowchart LR
             TRANSPORT_X["边界<br/>• 不持有任务状态<br/>• 不做轮询<br/>• 不做任务终态解释"]:::boundaryStyle
         end
 
-        subgraph TASKBOX["MinerUTask｜任务句柄"]
+        subgraph TASKBOX["AsyncResult｜结果句柄"]
             direction TB
             TASK["职责<br/>• 持有 task_id / data_id<br/>• 缓存最近状态 / 终态结果<br/>• 解释终态：返回结果或抛异常<br/>• 终态后 wait() 不再访问网络"]:::taskStyle
             TASK_X["边界<br/>• 不直接发 HTTP<br/>• 不决定轮询节奏<br/>• 非线程安全"]:::boundaryStyle
@@ -91,13 +88,12 @@ flowchart LR
 
     %% 句柄：Client 只负责创建 / 恢复，不接管任务生命周期
     CLIENT -- "构造并返回句柄" --> TASK
-    CLIENT -. "task(task_id)：从持久化 id 恢复<br/>不发起网络请求" .-> TASK
-    CLIENT -. "parse()：submit + wait，直接返回结果" .-> RESULT
+    CLIENT -. "resume(task_id)：从持久化 id 恢复<br/>不发起网络请求" .-> TASK
 
-    %% 等待：Task 定义语义，Poller 只决定节奏
-    TASK -- "wait()：Poller.run(fetch = task.refresh)" --> POLLER
+    %% 等待：AsyncResult 定义语义，Poller 只决定节奏
+    TASK -- "wait()：Poller.run(fetch = result.refresh)" --> POLLER
     POLLER -- "循环 fetch()" --> TASK
-    TASK -- "refresh()：client.trace(task_id)" --> CLIENT
+    TASK -- "refresh()：client._trace(task_id)（内部）" --> CLIENT
     CLIENT -- "normalize_status()" --> STATUS
     STATUS -- "写入 status 缓存" --> TASK
 

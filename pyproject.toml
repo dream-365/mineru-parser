@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mineru-parser"
 version = "0.1.0"
-description = "Task-handle based client for the MinerU extraction API"
+description = "Sync client for the MinerU extraction API with resumable result handles"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

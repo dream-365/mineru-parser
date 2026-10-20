@@ -1,7 +1,7 @@
-"""``MinerUApiClient``：配置、凭证与任务工厂。
+"""``MinerUApiClient``：配置、凭证与结果句柄工厂。
 
-客户端本身不保存任务状态，也不执行轮询；``submit`` 返回
-:class:`~mineru_parser.task.MinerUTask` 句柄，由句柄负责等待。
+客户端本身不保存任务状态，也不执行轮询；``submit`` / ``resume`` 返回
+:class:`~mineru_parser.client.async_result.AsyncResult` 句柄，由句柄负责等待。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ._validation import (
     validate_request_timeout,
     validate_task_id,
 )
-from .core import MINERU_BASE_URL, MinerUTransport
+from .async_result import AsyncResult
 from .errors import (
     MinerUAuthenticationError,
     MinerUConfigurationError,
@@ -32,7 +32,6 @@ from .errors import (
 )
 from .models import (
     ExtractionRequest,
-    MinerUTaskResult,
     MinerUTaskStatus,
     normalize_status,
 )
@@ -42,7 +41,7 @@ from .polling import (
     PollPolicy,
     PollRuntime,
 )
-from .task import MinerUTask
+from .transport import MINERU_BASE_URL, MinerUTransport
 
 
 class MinerUApiClient:
@@ -127,8 +126,8 @@ class MinerUApiClient:
         *,
         model_version: str = "vlm",
         data_id: str | None = None,
-    ) -> MinerUTask:
-        """提交任务，返回可等待的任务句柄。
+    ) -> AsyncResult:
+        """提交任务，返回可等待的结果句柄。
 
         只有“确定请求未发出”的错误或 HTTP 429 抛
         :class:`MinerUTransientError`；其余错误（包括结果未知、HTTP 4xx/5xx）
@@ -183,57 +182,33 @@ class MinerUApiClient:
             duration_ms,
             {"outcome": "success"},
         )
-        return MinerUTask(
+        return AsyncResult(
             client=self,
             task_id=provider_task_id,
             data_id=request.data_id,
         )
 
-    def trace(self, provider_task_id: str) -> MinerUTaskStatus:
-        """查询一次状态，返回归一化后的领域状态。"""
-        task_id = validate_task_id(provider_task_id)
-        api_key = self._resolve_api_key()
-        detail = self._transport.trace(task_id, api_key=api_key)
-        return normalize_status(task_id, detail)
-
-    def task(
+    def resume(
         self,
-        provider_task_id: str,
+        task_id: str,
         *,
         data_id: str | None = None,
-    ) -> MinerUTask:
-        """从已持久化的 task_id 恢复任务句柄，不发起网络请求。"""
-        return MinerUTask(
+    ) -> AsyncResult:
+        """从已持久化的 task_id 恢复结果句柄，不发起网络请求。"""
+        return AsyncResult(
             client=self,
-            task_id=validate_task_id(provider_task_id),
+            task_id=validate_task_id(task_id),
             data_id=validate_data_id(data_id),
         )
 
-    def parse(
-        self,
-        uri: str,
-        *,
-        model_version: str = "vlm",
-        data_id: str | None = None,
-        timeout: float | None = None,
-        deadline_epoch: float | None = None,
-        on_update: Callable[[MinerUTaskStatus], None] | None = None,
-        policy: PollPolicy | None = None,
-    ) -> MinerUTaskResult:
-        """``submit + wait`` 的便捷方法。"""
-        task = self.submit(
-            uri,
-            model_version=model_version,
-            data_id=data_id,
-        )
-        return task.wait(
-            timeout=timeout,
-            deadline_epoch=deadline_epoch,
-            on_update=on_update,
-            policy=policy,
-        )
-
     # --- 内部 -------------------------------------------------------------
+
+    def _trace(self, task_id: str) -> MinerUTaskStatus:
+        """内部状态查询：仅供 ``AsyncResult.refresh()`` 调用。"""
+        validated = validate_task_id(task_id)
+        api_key = self._resolve_api_key()
+        detail = self._transport.trace(validated, api_key=api_key)
+        return normalize_status(validated, detail)
 
     def _resolve_api_key(self) -> str:
         key = self._api_key

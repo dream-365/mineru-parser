@@ -1,7 +1,7 @@
 """轮询策略与循环。
 
 这一层只回答“什么时候再查、什么时候放弃”，不解释任务的成败；
-终态语义由 :class:`~mineru_parser.task.MinerUTask` 处理。
+终态语义由 :class:`~mineru_parser.client.async_result.AsyncResult` 处理。
 """
 
 from __future__ import annotations

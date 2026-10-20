@@ -2,28 +2,29 @@
 
 from __future__ import annotations
 
-from ._telemetry import MetricHook
-from .client import MinerUApiClient, MinerUClient
-from .errors import (
+from .client import (
+    DEFAULT_POLL_POLICY,
+    AsyncResult,
+    MetricHook,
+    MinerUApiClient,
     MinerUAuthenticationError,
+    MinerUClient,
     MinerUConfigurationError,
     MinerUError,
     MinerUExecutionError,
-    MinerUQuotaError,
-    MinerUTimeoutError,
-    MinerUTransientError,
-)
-from .models import (
     MinerUProgress,
+    MinerUQuotaError,
     MinerUTaskResult,
     MinerUTaskState,
     MinerUTaskStatus,
+    MinerUTimeoutError,
+    MinerUTransientError,
+    PollPolicy,
 )
-from .polling import DEFAULT_POLL_POLICY, PollPolicy
-from .task import MinerUTask
 
 __all__ = [
     "DEFAULT_POLL_POLICY",
+    "AsyncResult",
     "MetricHook",
     "MinerUApiClient",
     "MinerUAuthenticationError",
@@ -33,7 +34,6 @@ __all__ = [
     "MinerUExecutionError",
     "MinerUProgress",
     "MinerUQuotaError",
-    "MinerUTask",
     "MinerUTaskResult",
     "MinerUTaskState",
     "MinerUTaskStatus",

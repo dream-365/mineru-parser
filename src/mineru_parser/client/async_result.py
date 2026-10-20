@@ -1,7 +1,7 @@
-"""``MinerUTask``：任务身份、状态缓存与终态解释。
+"""``AsyncResult``：任务身份、状态缓存与终态解释。
 
-任务句柄只持有 ``task_id``、可选的 ``data_id`` 和服务端最近一次状态；
-真正的轮询节奏由 :mod:`mineru_parser.polling` 决定。
+结果句柄只持有 ``task_id``、可选的 ``data_id`` 和服务端最近一次状态；
+真正的轮询节奏由 :mod:`mineru_parser.client.polling` 决定。
 """
 
 from __future__ import annotations
@@ -31,14 +31,15 @@ from .models import (
 from .polling import PollPolicy
 
 if TYPE_CHECKING:
-    from .client import MinerUApiClient
+    from .api import MinerUApiClient
 
 
-class MinerUTask:
-    """一个已提交（或已恢复）的 MinerU 任务句柄。
+class AsyncResult:
+    """一个已提交（或已恢复）的 MinerU 任务结果句柄。
 
-    句柄不是线程安全的；多个线程等待同一任务时，每个线程应各自通过
-    ``client.task(task_id)`` 创建句柄。
+    同步阻塞式句柄，不实现 ``asyncio.Future``；获取最终结果通过
+    ``wait()`` 完成。句柄不是线程安全的；多个线程等待同一任务时，每个
+    线程应各自通过 ``client.resume(task_id)`` 创建独立句柄。
     """
 
     __slots__ = ("_client", "_data_id", "_result", "_status", "_task_id")
@@ -93,7 +94,7 @@ class MinerUTask:
     def __repr__(self) -> str:
         state = self._status.state.value if self._status is not None else "unknown"
         return (
-            f"MinerUTask(task_id={self._task_id!r}, "
+            f"AsyncResult(task_id={self._task_id!r}, "
             f"data_id={self.data_id!r}, state={state!r})"
         )
 
@@ -107,7 +108,7 @@ class MinerUTask:
         """
         if self._status is not None and self._status.state.is_terminal:
             return self._status
-        status = self._client.trace(self._task_id)
+        status = self._client._trace(self._task_id)
         self._status = status
         return status
 
@@ -250,4 +251,4 @@ class MinerUTask:
         )
 
 
-__all__ = ["MinerUTask"]
+__all__ = ["AsyncResult"]
