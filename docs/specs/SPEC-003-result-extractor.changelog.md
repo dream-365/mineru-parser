@@ -1,5 +1,28 @@
 # Changelog: SPEC-003 Result Extractor
 
+## [2026-10-21] - 评审修订：异常链契约、成员数预检闸门、错误分类与资源预算
+
+- **修改类型**: Changed / Fixed
+- **影响范围**: AC-2.2、AC-3.2、AC-3.5、AC-4.4、AC-4.12、AC-5.1、AC-5.2、AC-5.9、AC-6.4、AC-7.7、§3.2（提取限额 / 端到端资源预算 / 输出结构 / 内部常量）、§3.4（编排阶段 / 编排与收尾契约）、§3.5（EOCD 预检 / 常规文件判定 / 错误上下文路径 / 图片收集 / 有界成员读取）、§3.6（校验流水线 / `category` 归一 / 限额检查点 / 错误分类 / 错误清洗）、§4 边界表、§5 任务拆解与 AC↔测试映射、§6.1（R-2 / R-17 / R-18）、§6.2（闭环 Q-22 / Q-23）
+- **变更原因**: 对本 Spec 做了一轮对照**真实运行时**（CPython 3.13 `zipfile` / Pydantic v2 / 仓库真实样本 `tests/data/result_001.zip`）的契约核验，暴露出三类问题：(a) **AC-7.7 用 `from None` 无法满足**——Python 的隐式异常链取"当前正在处理的异常"，`from None` 只清 `__cause__`，原始 `ValidationError` 仍会挂在 `__context__` 上并携带 manifest 正文；(b) **EOCD 前置预检在默认限额下永远不可能触发**——条目数字段只有 16 位，≥65535 即写 ZIP64 标记，而超大成员数归档必然走 ZIP64；(c) **`category` 归一漏判**——`union_tag_not_found` 与"根层级少一层"两种情况都落到 `other`。另有若干"已验证的行为"陈述与事实不符，以及一处资源预算推导与默认值算不平。
+- **具体内容**:
+  - **异常链契约（P0）**：AC-6.4 明确原始 Pydantic 异常必须**同时**不出现在 `__cause__` 与 `__context__` 中，并写明唯一可靠形态——**在 `except` 块内只做信息提取，待 handler 退出后再抛出公共异常对象**；实测 `raise ... from None`（无论在 handler 内还是 handler 外）与显式赋 `__context__ = None` 均无法清除 `__context__`（`raise` 语句会用当前异常覆写它）。AC-3.5、AC-7.7、§3.6 错误清洗、§5 Phase 3/5 与测试映射同步补上 `__context__ is None` 的显式断言。
+  - **成员数预检改用中央目录大小（P0）**：AC-5.9 与 §3.5 改写为**条目数上界公式** $\max(\texttt{count\_exact}, \lceil \texttt{cd\_size}/46\rceil)$。理由：EOCD 条目数字段上限 65534，≥65535 写 `0xFFFF`（ZIP64），在默认 `max_members = 100_000` 下只数该字段的预检是死代码；改用中央目录大小后，200,000 成员归档的上界为 247,827，可在构造 `ZipFile` 之前拒绝。同时明确**前置预检不是安全边界**（EOCD 字段可被谎报），权威判定仍是构造后的 `len(infolist()) > max_members`；并写明上界保守导致的**误拒取舍**（50,000 个成员、平均名约 100 字节时上界 ≈ 160,870 会被拒）。新增常量 `_CD_RECORD_MIN_BYTES` / `_ENTRY_COUNT_OVERFLOW` / `_CD_SIZE_OVERFLOW`。
+  - **`category` 归一修正（P0）**：规则 1 扩展为 `union_tag_invalid` ∪ `union_tag_not_found`（块 `type` 缺失时 Pydantic 报的是后者，原先落入 `other`）；规则 3 扩展为"`loc` 为空 **或** 错误类型集合含 `list_type`"——根写成 `[block]`（少一层）时 `loc = (0,)` 非空，原先同样落入 `other`。补充说明规则 2 早于规则 4 使缺失 `bbox` 归 `invalid_bbox`（有意为之）。
+  - **"已验证的行为"订正（P1）**：§3.5 关于"归档注释含 EOCD 签名"的原陈述（自洽性校验失败并跳过预检、`zipfile` 自身会报 `BadZipFile`）**两处都与事实不符**——伪记录位于窗口尾部且注释长度为 0，自洽性校验**通过**，预检读到 `cd_size = 0` 并放行；`zipfile` 同样命中伪记录，把归档**静默解析成 0 个成员**且不报错。已改为如实描述，并在 §4 补对应边界行。
+  - **资源预算自洽（P1）**：`max_total_image_bytes` 由 256 MiB 下调为 **160 MiB**。按 $W=4$、$M=1$ GiB、$k_{\text{model}}=1$、$M_{\text{zipinfo}}=40$ MiB、$M_{\text{result}}=8$ MiB 推导，单次调用峰值约 240 MiB、$W=4$ 时约 960 MiB，满足 $W \times M_{\text{peak}} \le M_{\text{container}}$（原 256 MiB 在同一形态下约 1,272 MiB，超出 1 GiB）。§3.2 补齐推导假设表与 $X \le 192 - 16k$ MiB 的下调公式；AC-5.2、§5 Phase 5 的 README 峰值数字同步更新。
+  - **解除对上游组件的耦合（P1）**：§3.2 端到端预算表中的"上游下载 `max_bytes = 50 MiB`"改为"调用方侧（示例）"，明确 Extractor 不依赖该下载组件，与输入契约的来源无关原则一致（该数值本身对 `ResultDownloader` 仍然正确）。
+  - **常规文件判定补 `create_system`（P1）**：`external_attr` 的解释依赖 `create_system`（0 = MS-DOS，3 = Unix）。Unix mode 规则仅在 `create_system == 3` 时生效，MS-DOS 属性位规则仅在 `create_system == 0` 时生效，其他取值只按名称判定——避免 MS-DOS 归档高位残留位被误读为符号链接。同时说明 `zipfile` 对 Unix 目录项也会置 MS-DOS 标志 `0x10`，故目录判定以"名称以 `/` 结尾"为准。
+  - **清单条目可辨性（P1）**：AC-2.2 明确 `top_level_members` / `candidates` 按 canonical path 字典序升序取前 20 条，并附完整数量；无法 canonical 化的条目以 `!` 前缀标记，与 canonical path 机器可辨。AC-4.4 明确"含 `images` 段"指**段相等**而非子串匹配。
+  - **`LargeZipFile` 订正（P1）**：`zipfile.LargeZipFile` 的文档串为 "Raised when writing a zipfile"，三个抛出点全在写路径，**读取路径不会出现**。AC-3.2 / AC-4.12 / AC-5.1 与 §3.5 有界成员读取同步订正。
+  - **`__annotations__` 断言移除（P1）**：仓库统一使用 `from __future__ import annotations`，此时 `ExtractedImage.__annotations__` 是字符串而非类型对象；§3.2 改为不断言其具体形态。
+  - **边界表与 §4 同步（P1）**：三处"实际字节超限"行标注为**不可达**（与 §3.6 限额检查点表一致）；新增"成员名很长导致上界偏大"、"EOCD 字段被谎报"、"伪 EOCD 藏在归档注释"、"MS-DOS 归档"、"块 type 字段缺失"、"根层级少一层"六行。
+  - **遥测口径对齐（P2）**：§3.4 编排说明补上"`on_metric` / `correlation_id` 非法时 `Telemetry` 尚未构造、无法上报指标"的例外，与 AC-6.6 / §3.7 一致。
+  - **常量清单完备性说明（P2）**：§3.2 记录 `_UNSAFE_MSG_ERROR_TYPES` 的抽样验证结论（`json_invalid` / `list_type` / `dict_type` / `missing` / `literal_error` 的 `msg` 均不含输入值；`union_tag_invalid` 是当前唯一内嵌输入值的类型），并要求 Schema 变更后重新验证。
+- **说明**: 本轮**未改变**组件的职责边界、公共 API 签名（`extract_result` / `canonicalize_member_path`）、异常体系层次、限额字段集合、canonical path 规则与 manifest 定位范围。变更集中在三处：**异常链契约**（新增"handler 外抛出"的实现约束）、**成员数预检的判定量**（条目数字段 → 中央目录大小上界）、**`max_total_image_bytes` 默认值**（256 MiB → 160 MiB）。其余为事实订正与表述收敛。
+- **已核实为正确、本轮未改动的关键论断**: `len(data) ≤ file_size` 恒成立（`zipfile/__init__.py:1117` `data = data[:self._left]`；STORED 与 DEFLATED 均实测被钳制）；谎报 `file_size` + CRC 自洽确实导致静默截断（R-12）；`ZipFile.close()` 不关闭调用方传入的流（`_fpclose` 仅在 `not self._filePassed` 时关闭）；深层嵌套归 `json_invalid`（jiter "recursion limit exceeded"）；`union_tag_invalid` 是唯一内嵌输入值的 Pydantic 错误类型；重复成员在 `infolist()` 中保留两条而 `NameToInfo` 只留一条；§1.2 的样本基线与 `tests/data/result_001.zip` **逐字节吻合**（7 成员、manifest 4,803 B、1 页 6 块、图 13,936 B）。
+- **状态**: Draft。
+
 ## [2026-10-21] - 移除具体代码实现，规范收敛为契约表述
 
 - **修改类型**: Changed
