@@ -1,5 +1,42 @@
 # Changelog: SPEC-003 Result Extractor
 
+## [2026-10-21] - 移除具体代码实现，规范收敛为契约表述
+
+- **修改类型**: Changed
+- **影响范围**: 头部评审指引、§3.2 提取限额、§3.4 提取算法（整节重写）、§3.5 成员发现与路径规则（整节重写）、§3.6 Manifest 校验、§3.6 错误清洗、§3.7 遥测、§5 任务拆解、AC-1.11 / AC-2.5 / AC-2.6 / AC-4.1 的表述
+- **变更原因**: 项目写作规范新增「除了契约和示例外，SPEC 中不允许出现具体的代码实现」。本 Spec 此前把参考实现草案（`extract_result` 全量函数体、成员发现、路径归一、Schema 校验、错误清洗等）直接贴在 §3.4 ~ §3.6，读者难以分辨「哪些是必须满足的契约」与「哪些只是某个实现的选择」，实现一旦偏离就产生"Spec 与代码不一致"的伪冲突。
+- **具体内容**:
+  - §3.4 整节重写为**控制流契约**：新增「编排阶段」表（13 个阶段 × 动作 × 失败结果 × 依据）、参数校验契约表、流校验契约表、编排与收尾契约、异常 → `outcome` 映射表、指标标签装配规则。删除原「伪代码描述控制流」引导语与 `extract_result` 全量函数体、全部辅助函数实现。
+  - §3.5 整节重写为**判定规则**：EOCD 前置预检（读取窗口 / 定位 / 取值字段 / 自洽性校验 / ZIP64 标记 / 判定结果表）、canonical path（6 条顺序判定 + 不变式）、常规文件判定表、错误上下文路径表、Manifest 发现（9 步表）、图片根目录、图片收集（10 步表）、有界成员读取（9 步表）。删除 `_eocd_entry_count` / `_precheck_member_count` / `canonicalize_member_path` / `is_regular_file` / `_looks_like_symlink` / `log_context_path` / `safe_member_context` / `_context_name` / `_discover_manifest` / `_collect_images` / `_read_member` 的实现体。
+  - §3.6「Manifest 校验」重写为步骤表 + 错误明细清洗表 + `msg` 二次脱敏表 + `category` 归一判定顺序表；删除 `_sanitize_msg` / `_validation_category` / `_validate_manifest` 实现体。
+  - §3.2 `ExtractionLimits` 保留字段级契约（公开类型形状），删除 `__post_init__` 校验实现，改为「构造契约」文字条款。
+  - 全文清理对内部私有函数名的引用（`safe_member_context` / `log_context_path` / `_sanitize_msg` / `_validation_category` / `_precheck_member_count` / `_eocd_entry_count`），改为对应的规则表述；§5 任务拆解中的实现项同步改写为规则描述。
+  - 头部评审指引改写：§3 给出的是契约，**不包含具体代码实现**；实现方式由实现者决定；实现与 §3 契约不一致时以 AC 为准。
+  - **保留**（属契约或示例）：§3.2 `ExtractionLimits` 字段声明与 `ExtractedResult` / `ExtractedImage` / `ExtractionIssue` 类型定义、§3.3 公共 API 签名、§3.3 集成示例、AC-6.1 与 §3.2 异常体系树、§3.1 包结构与时序图、§3.6 校验流水线。
+- **说明**: **本轮未改变任何契约语义**——AC 清单、异常体系、限额默认值、判定规则、错误映射与 §4 边界表逐条保持不变；改动只涉及"契约如何被表述"。所有被删除的实现细节（函数划分、异常捕获顺序、辅助结构）均已由等价的行为条款覆盖，AC 与 §3 不再存在"实现与 Spec 打架"的表述冲突。SPEC-001 / SPEC-002 仍含实现代码块（SPEC-002 §3.4 的 `resolve()` 全量实现、SPEC-001 §3.4 的 poller 实现），待按同一规则收敛。
+- **状态**: Draft。
+
+## [2026-10-21] - 架构评审修订：大小判据、错误分类、可运营性与库级异常根
+
+- **修改类型**: Changed / Added
+- **影响范围**: Goal 10 ~ 12、§1.2 差距表、§1.4 Non-Goals、§1.5 威胁模型、US-1（AC-1.8 / AC-1.11）、US-2（AC-2.2）、US-3（AC-3.1 / AC-3.4 / AC-3.5）、US-4（AC-4.9 / AC-4.10 / AC-4.12 / AC-4.13 / AC-4.14）、US-5（AC-5.2 / AC-5.8 / 新增 AC-5.9 / 原 AC-5.9 顺延为 AC-5.10）、US-6（AC-6.1 / AC-6.2 / AC-6.3 / AC-6.5 / AC-6.7）、US-7（新增 AC-7.6 / AC-7.7）、§3.1 ~ §3.7、§4 边界表、§5 任务拆解与测试映射、§6.1 风险表（R-2 / R-5 / R-12 / 新增 R-17 / R-18）、§6.2 待决事项（新增 Q-19 / Q-20 / 闭环 Q-21）
+- **变更原因**: 架构评审发现三类问题：(a) 规范陈述的**大小判据与 `zipfile` 实际行为相反**——`ZipExtFile` 把读取钳制在中央目录声明的 `file_size` 内，"实际字节是最终判据"不成立，且会掩盖一个未被记录的静默截断路径；(b) **公共异常会携带 manifest 正文**——Pydantic 的 `union_tag_invalid` 消息原样内嵌用户控制的 `type` 值；(c) **失败不可分诊**——`not_found` 无任何上下文，校验错误没有可供分支的粗粒度分类，指标缺少分类维度。此外有三处结构性改进：引入库级公共根异常、公开路径归一 API、把成员数量检查前置到构造 `ZipFile` 之前。
+- **具体内容**:
+  - **大小判据修正（P0）**：AC-3.1 / AC-4.9 / AC-4.10 与 §3.6 限额检查点表改写为"**中央目录声明的 `file_size` 是唯一事实来源，既是预检也是实际上界**"；三项"实际字节超限"检查标注为**不可达的冗余断言**（保留仅为防御 `zipfile` 行为变化）。新增可触发的完整性检查：读取后校验 `len(data) == info.file_size`，不等 → `ArchiveError(reason="corrupt_member")`。R-12 改写为"谎报偏大导致误拒 / 谎报偏小且 CRC 自洽导致**静默截断**"；静默截断无法在 Extractor 内消除，已写入输出契约与 AC-4.14（下游必须自行校验图片内容）。
+  - **正文泄漏修复（P0）**：AC-3.5 要求 `msg` **二次脱敏**——`_UNSAFE_MSG_ERROR_TYPES = {"union_tag_invalid"}` 的错误类型其 `msg` 会内嵌用户输入，一律替换为固定文案；§3.6 清洗清单补入该条；AC-6.3 的禁止清单补入"`msg` 中内嵌的输入值"。新增 **AC-7.7 正文泄漏哨兵测试**（向 manifest 各字符串字段注入哨兵串，断言异常、`issues`、`__cause__`、`__context__` 均不含哨兵）。
+  - **错误分类收敛（P0）**：删除 `too_deep` 原因——Pydantic v2 的 jiter 解析器在递归上限处报 `json_invalid` 而非 `RecursionError`，深度耗尽与语法错误同归 `invalid_json`；异常体系表、错误分类表、边界表、任务拆解同步更新。
+  - **结构化字段保真（P1）**：`member` / `manifest_path` / `candidates` / `top_level_members` 中的 canonical path **完整未截断**（供调用方程序化定位）；512 字符截断只发生在**日志渲染**（`safe_context_path` 更名 `log_context_path`）。修正了 AC-4.12 与 AC-3.5 同 §3.6 之间的自相矛盾。
+  - **引用解析约定（P1）**：明确 `image_source.path` 是上游原始字符串、**不保证与 `images[].path` 逐字相等**；新增**公共 API `canonicalize_member_path`**（Goal 12 / AC-1.11），下游须先归一再匹配；返回契约与集成示例同步给出可执行用法。
+  - **失败可分诊（P1）**：`not_found` 携带 `top_level_members`（≤ 20）与 `top_level_member_count`；`ResultExtractionValidationError` 新增 `category`（`unknown_block_type` / `missing_field` / `invalid_bbox` / `root_shape` / `other`），回答"该升级 Schema 还是该拒收文档"。
+  - **库级公共根异常（P2）**：新增 `MinerUParserError`（Goal 11 / AC-6.1），`MinerUError`、`ResultDownloadError`、`ResultExtractionError` 均继承之且**彼此互不继承**；纯加性变更，既有捕获语义不变。SPEC-001 / SPEC-002 的 Spec 侧回写已完成（见各自的 changelog）。
+  - **成员数量前置预检（P2）**：新增 AC-5.9——从流尾部 64 KiB 窗口解析 EOCD 条目总数，在构造 `ZipFile` **之前**拒绝超限归档；自洽性校验不通过或 ZIP64 标记时跳过预检，中央目录解析后的后置检查始终保留。R-2 相应更新。
+  - **端到端资源预算（P2）**：§3.2 新增"端到端资源预算"小节，给出峰值内存公式与并发约束 $W \times M_{\text{peak}} \le M_{\text{container}}$，并说明"压缩侧 50 MiB ≠ 解压侧 256 MiB"，因此"下载成功但提取被限额拒绝"是正常可达状态。新增 R-17。
+  - **指标分类维度（P2）**：指标标签由仅 `outcome` 扩展为 `outcome` + `reason` / `resource` / `category`（均为封闭枚举，基数有界），使"上游返回错误页"与"可疑归档"可在同一监控图上区分；路径、成员名、文档内容、`correlation_id` 仍禁止进入标签。
+  - **方法论（P2）**：新增 **AC-7.6 性质测试**（Hypothesis，对任意字节串断言结果不变式与"无部分结果、无落盘"）；文档头部增加**评审指引**，声明 §2 的 AC 为唯一契约源、§3 的代码块为参考实现草案；§5 新增 Phase 0（公共根异常）与性质测试任务。
+  - **形态收敛**：§5 新增 Phase 6——把 §3.4 / §3.5 / §3.6 的实现伪码改写为契约条款，落实 `docs/specs/CLAUDE.md` §1.6「除契约和示例外，SPEC 中不允许出现具体代码实现」。SPEC-001 / SPEC-002 同步登记 Phase 6。
+- **说明**: 本轮修订未改变组件的职责边界与输入契约；`extract_result` 的签名与返回结构保持不变，新增的公共面只有 `canonicalize_member_path` 与 `MinerUParserError` 两项。限额默认值未变，仅补齐了推导口径。SPEC-001 / SPEC-002 的 Spec 侧回写（异常体系、AC、非目标、待决事项、changelog）**已完成**；代码侧的继承调整随 §5 Phase 0 落地。
+- **状态**: Draft。
+
 ## [2026-10-21] - 输入契约标准化，解除与上游下载组件的耦合
 
 - **修改类型**: Changed

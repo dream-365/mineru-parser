@@ -1,5 +1,20 @@
 # Changelog: SPEC-001 MinerUApiClient
 
+## [2026-10-21] - 引入库级公共根异常 `MinerUParserError`
+
+- **修改类型**: Changed / Added
+- **影响范围**: US-6（新增 AC-6.7）、3.5 错误分类（异常层级）
+- **变更原因**: SPEC-003（Result Extractor）落地后，库内出现第三条失败路径（客户端 / 下载 / 解析）。三条路径需要能"一网打尽"地统一捕获，但同时必须保持互不继承——客户端失败、下载失败与解析失败的处置动作完全不同（重试 / 重新下载 / 拒收），不能被同一个 `except` 混为一谈。
+- **具体内容**:
+  - 新增库级公共根异常 `MinerUParserError`（定义于 `mineru_parser/errors.py`，由 `mineru_parser` 顶层导出），直接继承 `Exception`。
+  - `MinerUError` 改为**同时**继承 `MinerUParserError`；其既有子类层次（`MinerUTransientError` / `MinerUTimeoutError` / `MinerUExecutionError` 及其子类）完全不变。
+  - 3.5 异常层级图更新为 `MinerUParserError → MinerUError → ...`，并注明 `MinerUError` 与 `ResultDownloadError`（SPEC-002）、`ResultExtractionError`（SPEC-003）**互不继承**。
+  - 新增 AC-6.7：继承关系与互不继承约束必须由 `issubclass` 断言覆盖。
+  - §5 新增 **Phase 5**（库级公共根异常的代码落地：`MinerUError` 继承调整、顶层导出、模块说明更新、继承断言测试、全量回归）与 **Phase 6**（§3.4 实现伪码收敛为契约条款，落实 `docs/specs/CLAUDE.md` §1.6「除契约和示例外，SPEC 中不允许出现具体代码实现」）；AC-6.7 同步补入 AC 与测试映射表。
+- **说明**: 属**纯加性**变更——既有 `except MinerUError` 的捕获语义完全不变，新增的只是"一网打尽"捕获全库失败的能力。SPEC-001 的公共 API 面积与行为语义未发生其他变化。
+- **代码落地**: 继承调整随 SPEC-003 的 Phase 0 一并实现。在此之前 `MinerUError` 仍直接继承 `Exception`；两种状态的捕获行为无差异，仅 `issubclass(MinerUError, MinerUParserError)` 的断言需等到 Phase 0 落地后才成立。
+- **状态**: Implemented。
+
 ## [2026-10-21] - 关联 SPEC-002 ResultDownloader
 
 - **修改类型**: Changed

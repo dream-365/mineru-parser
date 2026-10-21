@@ -8,6 +8,8 @@
 | **更新时间** | 2026-10-21 |
 | **关联 Issue/PR** | —（待关联） |
 
+> **评审指引**：本 Spec 的**唯一契约源是 §2 的验收标准（AC）**。评审以 AC 清单为准，逐条确认"可断言 / 可测试"；§3 给出的是**契约**（公共 API、数据模型、判定规则、错误映射），**不包含具体代码实现**——实现方式由实现者决定，§3 只约束"必须做什么"与"必须如何判定"；§4 是边界场景速查表，§6 是已知风险清单。实现与 §3 契约不一致时以 AC 为准，并回写本 Spec。
+
 ---
 
 ## 1. 背景与目标 (Context & Objectives)
@@ -68,8 +70,10 @@ flowchart LR
 | 损坏 / 加密 / 不支持压缩分类 | ❌ | ⚠️ 各自捕获 | ✅ 统一异常体系 |
 | 不关闭调用方流 / 恢复游标 | ⚠️ 易遗漏 | ⚠️ 易遗漏 | ✅ 显式契约 |
 | 无磁盘解压 | ⚠️ 易使用 `extractall` | ❌ 常落盘 | ✅ 仅内存读取 |
-| 错误上下文脱敏 | ❌ | ❌ | ✅ 不泄漏文档内容 |
-| 可观测性 | ❌ | ❌ | ✅ 日志 / 指标统一出口 |
+| 错误上下文脱敏 | ❌ | ❌ | ✅ 不泄漏文档内容（含 Pydantic `msg` 二次脱敏） |
+| 成员数量前置预检 | ❌ | ❌ | ✅ EOCD 预扫描，构造 `ZipFile` 前拒绝 |
+| 失败可分诊 | ❌ | ❌ | ✅ `category` / `reason` / 顶层成员清单 |
+| 可观测性 | ❌ | ❌ | ✅ 日志 / 指标统一出口（标签为封闭枚举） |
 | 无网络、内存 ZIP 测试 | ⚠️ | ⚠️ | ✅ 纯函数 |
 
 > **样本基线（2026-10-21）**：用一个最小真实结果包核对，ZIP 共 7 个成员：`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`。manifest 4,803 B，已用 `TypeAdapter(DocumentContentSchema)` 校验通过（1 页、6 个块：TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；ImageBlock 的 `image_source.path` 为 `images/<sha256>.jpg`，与图片成员路径一致；图片 1 张、13,936 B。该样本确认「根目录 manifest + 根 `images/`」布局与默认限额的宽松度，也确认了本期把 manifest 定位范围收敛到 ZIP 顶层目录（Goal 2）的依据；样本量不足以校准 P95/P99，真实样本统计仍见 R-1。
@@ -87,7 +91,9 @@ flowchart LR
 - [ ] **Goal 7**：明确流生命周期：不关闭调用方流，成功/失败后恢复游标。
 - [ ] **Goal 8**：全程不落盘、不调用 `extract()` / `extractall()`、不写临时文件。
 - [ ] **Goal 9**：日志 / 指标统一出口，指标回调异常不影响解析；支持 `correlation_id`。
-- [ ] **Goal 10**：纯函数、无网络依赖，所有边界可用内存 ZIP 测试覆盖。
+- [ ] **Goal 10**：纯函数、无网络依赖，所有边界可用内存 ZIP 测试覆盖，并以性质测试（property-based）交叉验证不变式。
+- [ ] **Goal 11**：引入库级公共根异常 `MinerUParserError`，让客户端、下载器、提取器三条失败路径共享同一根异常，同时保持彼此互不继承。
+- [ ] **Goal 12**：公开 `canonicalize_member_path`，使下游能用与 Extractor 完全一致的规则解析 manifest 中的图片引用。
 
 ### 1.4 非目标 (Non-Goals / Out of Scope)
 
@@ -109,6 +115,9 @@ flowchart LR
 - [ ] JSON 重复键检测；解析器按“后值覆盖前值”处理。
 - [ ] 对损坏 ZIP 自动重试；本地解析错误是终态，调用方可重新下载后再次调用。
 - [ ] 任意 ZIP 成员访问 API；只读取顶层 manifest 与顶层 `images/` 下的文件。
+- [ ] 解析 ZIP 注释、extra field、ZIP64 扩展字段等中央目录以外的元数据；EOCD 预扫描只取成员总数。
+- [ ] 绕开 `zipfile` 自行实现成员解压（含 CRC 与加密处理）；成员内容长度以中央目录声明为准，完整性校验交由下游。
+- [ ] 图片内容哈希校验（即使 MinerU 侧按 `<sha256>` 命名图片，也不假设该约定成立）。
 
 ### 1.5 威胁模型 (Threat Model)
 
@@ -118,7 +127,7 @@ flowchart LR
 | **受保护资产** | 进程内存、下游磁盘（若调用方使用返回的 path 落盘）、下游图片渲染器与解析器。 |
 | **攻击者能力** | 控制成员名、成员数量、声明大小、压缩方法、加密标志、JSON 结构与图片字节；可构造重复成员、`..` 路径、超大解压结果、深层嵌套 JSON。 |
 | **主要控制** | 唯一 manifest、canonical path、拒绝不安全成员、仅内存读取、有界读取、解压后大小/数量上限、Pydantic Schema 校验、失败不返回部分结果。 |
-| **残余风险** | `zipfile` / `zlib` 的 CPU 放大与实现漏洞、Pydantic 模型内存放大、下游图片解码漏洞、manifest 与图片引用不一致、无法识别的符号链接。 |
+| **残余风险** | `zipfile` / `zlib` 的 CPU 放大与实现漏洞、Pydantic 模型内存放大、下游图片解码漏洞、manifest 与图片引用不一致、无法识别的符号链接、**敌意归档谎报 `file_size` 造成的图片静默截断**（见 R-12 与 §3.3 输出契约）。 |
 
 > 本 Spec 的安全承诺以“不落盘、只读取顶层 manifest 与顶层 `images/`、使用有界读取”为前提。调用方若把返回的 path 直接拼接到磁盘路径，仍需自行做目标目录约束；Extractor 的 canonical path 只是第一道防线。
 
@@ -141,9 +150,10 @@ flowchart LR
 * **AC-1.5**: 不得修改输入流内容；成功与所有已处理失败路径都必须把游标恢复到调用前位置。恢复失败时必须记录 `mineru.extract.restore_failed` 警告日志，但不得覆盖主要成功/失败结果。
 * **AC-1.6**: 输入必须是可读、可 seek 的二进制流。`io.TextIOBase`、缺少 `read`/`seek`/`tell`、`seekable()` / `readable()` 为假，或解析前 `tell()` 失败，必须在读取 ZIP 前抛出 `ResultExtractionConfigurationError(field="stream")`。
 * **AC-1.7**: `limits` 必须是 `ExtractionLimits | None`；`on_metric` 必须是 callable 或 `None`；`correlation_id` 必须是 `str | None`。非法值必须在读取 ZIP 前抛出 `ResultExtractionConfigurationError`。
-* **AC-1.8**: `extract_result`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、`ExtractionIssue` 与全部 `ResultExtraction*Error` 必须可从 `mineru_parser.extractor` 与顶层 `mineru_parser` 导入。
+* **AC-1.8**: `extract_result`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、`ExtractionIssue`、`canonicalize_member_path` 与全部 `ResultExtraction*Error` 必须可从 `mineru_parser.extractor` 与顶层 `mineru_parser` 导入。
 * **AC-1.9**: 函数不得持有可变模块级调用状态；不同流上的并发调用必须安全。同一个流上的并发调用不受支持，实现无需加锁。
 * **AC-1.10**: 不得调用 `stream.close()`、`ZipFile.extract()` 或 `ZipFile.extractall()`。
+* **AC-1.11**: `canonicalize_member_path(raw: str) -> str | None` 必须对任意字符串返回与 Extractor 内部**完全一致**的 canonical path，无法安全 canonical 化时返回 `None`。实现必须与 `_members` 共用同一份函数，不得复制第二套规则；该函数不得访问 ZIP、不得读取任何成员。
 
 ---
 
@@ -156,7 +166,8 @@ flowchart LR
 #### 验收标准 (Acceptance Criteria)
 
 * **AC-2.1**: manifest 候选必须同时满足：(a) 成员位于 ZIP **顶层目录**——原始成员名不含 `/`；(b) 其**原始 basename** 以 `_content_list_v2.json` 结尾（大小写敏感），`*` 允许为空前缀。顶层候选随后必须通过 canonical path 安全校验与常规文件判定。位于子目录的同名成员一律不参与定位，也不计入候选数。
-* **AC-2.2**: 必须恰好有一个候选。零个 → `ResultExtractionManifestError(reason="not_found")`；多于一个 → `ResultExtractionManifestError(reason="ambiguous")`，其中 `candidates` 为排序后的 canonical path（最多 20 条），`candidate_count` 为完整数量。
+* **AC-2.2**: 必须恰好有一个候选。零个 → `ResultExtractionManifestError(reason="not_found")`，且必须携带 `top_level_members`（ZIP 顶层成员名的脱敏清单，最多 20 条）与 `top_level_member_count`（顶层成员总数）；多于一个 → `ResultExtractionManifestError(reason="ambiguous")`，其中 `candidates` 为排序后的 canonical path（最多 20 条），`candidate_count` 为完整数量。
+  > `not_found` 是布局漂移（R-5）的主要观测点。没有顶层成员清单时，运维无法区分"上游把 manifest 挪到了子目录""包结构整体变了"与"拿到的根本不是结果包"。顶层成员名属于归档元数据而非文档正文，可经转义 + 截断后的诊断上下文携带。
 * **AC-2.3**: 目录项（名称以 `/` 结尾）不在顶层范围，不会被选为候选。顶层候选的 basename 匹配后缀但不是常规文件（符号链接、带目录属性等），或名称无法 canonical 化（反斜杠、NUL/C0/C1 控制字符）时，必须抛出 `ResultExtractionArchiveError(reason="unsafe_member")`，不得静默忽略。
 * **AC-2.4**: 多个 ZIP 成员 canonical 化到同一 manifest 路径时，必须按多个候选处理并报 `ambiguous`；实现不得依赖 `ZipFile.read(name)` 或 `NameToInfo` 的“后值覆盖”语义。
 * **AC-2.5**: 选中的 manifest 必须通过其 `ZipInfo` 对象打开，不得按名称二次查找，避免重复名称把读取重定向到另一个成员。
@@ -174,11 +185,16 @@ flowchart LR
 
 #### 验收标准 (Acceptance Criteria)
 
-* **AC-3.1**: 读取前若 `ZipInfo.file_size > max_manifest_bytes`，必须抛出 `ResultExtractionLimitError(resource="manifest", limit=..., actual=file_size, member=path)`。读取时最多读取 `max_manifest_bytes + 1` 字节；实际字节超限时抛出同一异常并令 `actual=len(data)`。声明大小只是提示，实际字节是最终判据。
+* **AC-3.1**: 读取前若 `ZipInfo.file_size > max_manifest_bytes`，必须抛出 `ResultExtractionLimitError(resource="manifest", limit=..., actual=file_size, member=path)`。读取时最多读取 `max_manifest_bytes + 1` 字节。
+  > **大小判据的唯一事实来源是中央目录声明的 `file_size`**：`zipfile` 的 `ZipExtFile` 把每次读取钳制在 `file_size` 之内，因此 `len(data) ≤ file_size` 恒成立；预检通过后"实际字节超限"分支不可达，只作为冗余断言保留。声明大小因此**既是预检也是实际上界**，本 Spec 不得声称"实际字节是最终判据"（该说法与 `zipfile` 实现不符，见 R-12）。
+  > 读取完成后必须校验 `len(data) == info.file_size`；不等说明成员被提前截断，必须抛出 `ResultExtractionArchiveError(reason="corrupt_member", member=path)`。
 * **AC-3.2**: 加密 manifest（`flag_bits & 0x1`，或 `zipfile` 抛出加密相关 `RuntimeError`）→ `ResultExtractionArchiveError(reason="encrypted_member", member=path)`；不支持的压缩方法 → `reason="unsupported_compression"`；CRC / 解压 / 截断 / `LargeZipFile` → `reason="corrupt_member"`；底层流 I/O 失败 → `reason="read_failed"`。
 * **AC-3.3**: 必须按 UTF-8 解码，并允许去除一个可选的 UTF-8 BOM。`UnicodeDecodeError` → `ResultExtractionManifestError(reason="invalid_encoding", manifest_path=path)`。不得猜测其他编码。
-* **AC-3.4**: 必须使用模块级 `TypeAdapter(DocumentContentSchema)` 的 `validate_json(text)` 完成 JSON 与 Schema 校验。Pydantic `ValidationError` 中包含 `json_invalid` 类型 → `ResultExtractionManifestError(reason="invalid_json", manifest_path=path)`；`RecursionError` → `ResultExtractionManifestError(reason="too_deep", manifest_path=path)`。
-* **AC-3.5**: JSON 合法但不符合 `DocumentContentSchema` → `ResultExtractionValidationError`，携带 `manifest_path`、清洗后的 `issues`（仅 `loc` / `type` / `msg`，最多 20 条）与完整 `issue_count`。异常消息与 traceback 不得包含 manifest 正文；必须使用 `from None` 或等价方式切断原始 `ValidationError` 的显式因果链。
+* **AC-3.4**: 必须使用模块级 `TypeAdapter(DocumentContentSchema)` 的 `validate_json(text)` 完成 JSON 与 Schema 校验。Pydantic `ValidationError` 中包含 `json_invalid` 类型 → `ResultExtractionManifestError(reason="invalid_json", manifest_path=path)`。
+  > 深层嵌套 JSON 由 JSON 解析器的递归上限拦截，并以 `json_invalid` 类型出现（Pydantic v2 的 jiter 解析器在递归上限处报 "recursion limit exceeded"），**不产生 `RecursionError`**。因此本 Spec **不设 `too_deep` 原因**：深度耗尽与语法错误同归 `invalid_json`。若 `RecursionError` 仍意外发生（模型校验阶段），按 `invalid_json` 处理，不得引入未在 AC-6.2 登记的 `reason`。
+* **AC-3.5**: JSON 合法但不符合 `DocumentContentSchema` → `ResultExtractionValidationError`，携带 `manifest_path`、粗粒度 `category`、清洗后的 `issues`（仅 `loc` / `type` / `msg`，最多 20 条）与完整 `issue_count`。异常消息与 traceback 不得包含 manifest 正文；必须使用 `from None` 或等价方式切断原始 `ValidationError` 的显式因果链。
+  > **`msg` 必须二次脱敏**：Pydantic 的 `msg` 可能内嵌用户控制的输入值。典型如 `union_tag_invalid` 的 `msg` 形如 `Input tag '<原始值>' found using 'type' does not match any of the expected tags: ...`，直接保留会把 manifest 正文原样带进公共异常属性。凡 `msg` 会内嵌输入值的错误类型，必须替换为不含输入的固定文案，清单见 §3.6。
+  > `category` 取封闭枚举：`unknown_block_type` / `missing_field` / `invalid_bbox` / `root_shape` / `other`，由 Extractor 依据 `issues[].type` 与 `issues[].loc` 归一后产出。它回答的是"调用方该做什么"——升级 Schema（`unknown_block_type`）还是拒收该文档（其余）——因此**不得让调用方去匹配 Pydantic 原始 type 字符串**（AC-6.9）。
 * **AC-3.6**: 根必须是 `list[list[LayoutElement]]`。未知块 `type`、缺少必填字段、根结构错误、非法 `bbox` 都必须产生 Schema 校验错误。
 * **AC-3.7**: `[]` 是合法文档 → `pages=[]`；`[[]]` 在 Schema 下也是合法页。空文档与空页不得被视为错误。
 * **AC-3.8**: 校验必须原样使用 `content_v2` 的语义：不得设置 `strict=True`、不得设置 `extra="forbid"`、不得修改模型。已知块中的额外字段按 Pydantic 默认忽略；未知块 `type` 由判别联合拒绝。
@@ -203,12 +219,13 @@ flowchart LR
 * **AC-4.6**: `images` 必须按 canonical path 的 Python `str` 字典序升序排列。`path` 必须是完整归档相对路径，恒为 `images/...` 形式（例如 `images/a.jpg`）。
 * **AC-4.7**: 图片根目录不存在或没有常规文件时，`images=[]` 且提取成功；仅有一个 `images/` 目录项不是错误。
 * **AC-4.8**: 构建图片条目列表时，一旦数量超过 `max_images` 必须立即抛出 `ResultExtractionLimitError(resource="image_count", limit=..., actual=已观察数量, member=None)`（`actual` 至少为 `max_images + 1`）；读取任何图片前，若声明 `file_size` 总和 > `max_total_image_bytes` → `ResultExtractionLimitError(resource="total_image_bytes", limit=..., actual=sum, member=None)`。
-* **AC-4.9**: 单张图片读取前，若 `file_size > max_image_bytes` → `ResultExtractionLimitError(resource="image", limit=..., actual=file_size, member=path)`；读取时最多读取 `max_image_bytes + 1` 字节，实际超限时抛出同一异常并令 `actual=len(data)`。
-* **AC-4.10**: 必须累计实际字节数；累计值超过 `max_total_image_bytes` → `ResultExtractionLimitError(resource="total_image_bytes", limit=..., actual=total, member=path)`。实际字节优先于声明大小。
+* **AC-4.9**: 单张图片读取前，若 `file_size > max_image_bytes` → `ResultExtractionLimitError(resource="image", limit=..., actual=file_size, member=path)`；读取时最多读取 `max_image_bytes + 1` 字节。读取完成后必须校验 `len(data) == info.file_size`；不等 → `ResultExtractionArchiveError(reason="corrupt_member", member=path)`。大小判据与 AC-3.1 完全一致：中央目录声明的 `file_size` 是唯一事实来源，"实际字节超限"分支仅为冗余断言。
+* **AC-4.10**: 必须累计实际字节数；累计值超过 `max_total_image_bytes` → `ResultExtractionLimitError(resource="total_image_bytes", limit=..., actual=total, member=path)`。由于 `len(data) ≤ file_size`，该检查在声明总量预检通过后不可达，仅作为冗余断言保留；**声明总量预检才是有效闸门**。
 * **AC-4.11**: 任一限额或成员错误都必须使整次提取失败，不得返回部分 `images` 列表。
-* **AC-4.12**: 图片成员失败必须映射为 `ResultExtractionArchiveError`：加密 → `encrypted_member`；不支持的压缩 → `unsupported_compression`；CRC / 解压 / 截断 / `LargeZipFile` → `corrupt_member`；底层流 I/O → `read_failed`。`member` 必须是 canonical 图片路径。
+* **AC-4.12**: 图片成员失败必须映射为 `ResultExtractionArchiveError`：加密 → `encrypted_member`；不支持的压缩 → `unsupported_compression`；CRC / 解压 / 截断 / `LargeZipFile` / 读取长度与声明不符 → `corrupt_member`；底层流 I/O → `read_failed`。`member` 必须是**完整未截断的** canonical 图片路径。
 * **AC-4.13**: 不得对 `pages` 中的 `image_source.path` 与 `images` 做交叉校验；缺失引用与未引用图片都允许。
-* **AC-4.14**: 不得解码或校验图片内容；损坏的图片字节按原样返回，由下游决定如何处理。
+  > **引用解析约定（对下游可执行）**：`image_source.path` 是上游原始字符串，Extractor 既不规范化它、也不改写它，因此**不保证与 `images[].path` 逐字相等**（上游给出 `images/./a.jpg` 时，Extractor 输出的是 `images/a.jpg`）。下游必须先用公共 API `canonicalize_member_path(image_source.path)` 归一，再与 `images[].path` 匹配；归一失败（返回 `None`）即视为不可解析的引用。Extractor 自身不做该匹配，也不得据此增删 `images` 条目。
+* **AC-4.14**: 不得解码或校验图片内容；损坏的图片字节按原样返回，由下游决定如何处理。**注意**：成员长度以中央目录声明的 `file_size` 为准，敌意归档可谎报该值使内容被静默截断（见 AC-3.1 与 R-12），因此"按原样返回"包含"可能已被截断"的情形，**下游在使用图片前必须自行校验内容**。
 
 ---
 
@@ -222,13 +239,15 @@ flowchart LR
 
 * **AC-5.1**: 打开流或解析中央目录时出现 `zipfile.BadZipFile`、`zipfile.LargeZipFile` 或 `OSError` → `ResultExtractionArchiveError(reason="invalid_zip")`。空流、HTTP 错误页、非 ZIP 内容都映射到该错误。
 * **AC-5.2**: `ExtractionLimits` 默认值必须为：`max_manifest_bytes = 16 MiB`（16,777,216）、`max_image_bytes = 32 MiB`（33,554,432）、`max_total_image_bytes = 256 MiB`（268,435,456）、`max_images = 10_000`、`max_members = 100_000`。`DEFAULT_EXTRACTION_LIMITS` 必须暴露具有这些值的实例。
+  > 默认值必须与 §3.2 的**端到端资源预算**自洽：给定并发度 $W$ 与每进程内存上限 $M$，需满足 $W \times \big(\texttt{max\_total\_image\_bytes} + \texttt{max\_manifest\_bytes} \times (1 + k_{\text{model}}) + M_{\text{zipinfo}}\big) \le M$。当前默认值按 $W = 4$、$M = 1\,\text{GiB}$ 推导，**因此单次调用的峰值内存上限必须写入 README**；超出该形态的部署用 `ExtractionLimits` 覆盖 `max_total_image_bytes`。
 * **AC-5.3**: 每个限额字段必须是正整数（拒绝 `bool`）；非法构造必须抛出 `ResultExtractionConfigurationError(field=<字段名>)`。`extract_result` 的 `limits=None` 表示使用默认值，不提供“无上限”模式。
 * **AC-5.4**: 不得把任何成员解压到磁盘，不得创建临时文件；必须以只读模式打开 ZIP，并通过上下文管理器关闭 `ZipFile`。
 * **AC-5.5**: 只允许读取选中的顶层 manifest 与顶层 `images/` 下的常规文件。其他成员不得被解压；它们的损坏、加密或不支持压缩不得导致提取失败。
 * **AC-5.6**: 所有成员读取必须有界（`archive.open(info)` + `read(limit + 1)`）；不得对 manifest 或图片使用无界的 `ZipFile.read(name)`。必须通过 `ZipInfo` 定位选中成员。
 * **AC-5.7**: 成功与失败后调用方流都必须保持打开。`ZipFile.close()` 不得关闭传入的流；Extractor 不得调用 `stream.close()`。
-* **AC-5.8**: 峰值内存必须按“ZIP 中央目录 `ZipInfo` + manifest 字节 + 解码文本 + Pydantic 模型 + 图片字节 + 结果字典”估算并文档化；`max_members` 只能阻止后续遍历，无法回退 `ZipFile` 已分配的中央目录内存。实现必须包含基于 `tracemalloc` 的合成归档内存测试，不得把压缩后大小当作内存上界。
-* **AC-5.9**: 不得自动重试；损坏归档是终态错误。调用方可以重新下载后再次调用。
+* **AC-5.8**: 峰值内存必须按“ZIP 中央目录 `ZipInfo` + manifest 字节 + 解码文本 + Pydantic 模型 + 图片字节 + 结果字典”估算并文档化。实现必须包含基于 `tracemalloc` 的合成归档内存测试，不得把压缩后大小当作内存上界。
+* **AC-5.9**: **成员数量必须在构造 `ZipFile` 之前预检**：从流尾部读取 End-Of-Central-Directory (EOCD) 记录，取中央目录条目总数；大于 `max_members` 时立即抛出 `ResultExtractionLimitError(resource="member_count", limit=..., actual=count)`，不得先构造 `ZipFile` 再拒绝。预检必须满足：(a) 只读流尾部（末尾 64 KiB 窗口），不改变调用方游标语义；(b) 解析结果必须自洽校验（EOCD 签名、注释长度与窗口尾部一致、单盘归档），否则视为不可信并**跳过预检**；(c) 条目数为 ZIP64 标记（`0xFFFF`）时**跳过预检**。后置检查（`len(infolist()) > max_members`）必须始终保留，两者是"前置快速拒绝 + 后置兜底"的关系。
+* **AC-5.10**: 不得自动重试；损坏归档是终态错误。调用方可以重新下载后再次调用。
 
 ---
 
@@ -240,23 +259,32 @@ flowchart LR
 
 #### 验收标准 (Acceptance Criteria)
 
-* **AC-6.1**: 必须定义以下异常体系；全部继承 `ResultExtractionError`，且不得继承 `MinerUError` 或 `ResultDownloadError`：
+* **AC-6.1**: 必须定义以下异常体系；提取侧全部继承 `ResultExtractionError`，且不得继承 `MinerUError` 或 `ResultDownloadError`：
 
   ```text
-  ResultExtractionError
-  ├── ResultExtractionConfigurationError
-  ├── ResultExtractionArchiveError
-  ├── ResultExtractionManifestError
-  ├── ResultExtractionValidationError
-  └── ResultExtractionLimitError
+  MinerUParserError
+  ├── MinerUError            # 既有客户端异常体系
+  ├── ResultDownloadError    # 既有下载器异常体系
+  └── ResultExtractionError
+      ├── ResultExtractionConfigurationError
+      ├── ResultExtractionArchiveError
+      ├── ResultExtractionManifestError
+      ├── ResultExtractionValidationError
+      └── ResultExtractionLimitError
   ```
 
-* **AC-6.2**: `ArchiveError` 携带 `reason`（`invalid_zip` / `unsafe_member` / `duplicate_member` / `encrypted_member` / `unsupported_compression` / `corrupt_member` / `read_failed`）与 `member: str | None`；`ManifestError` 携带 `reason`（`not_found` / `ambiguous` / `invalid_encoding` / `invalid_json` / `too_deep`）、`manifest_path: str | None`、`candidates: tuple[str, ...]`、`candidate_count: int`；`ValidationError` 携带 `manifest_path`、`issues: tuple[ExtractionIssue, ...]`、`issue_count: int`；`LimitError` 携带 `resource`（`manifest` / `image` / `image_count` / `total_image_bytes` / `member_count`）、`limit`、`actual`、`member`；`ConfigurationError` 携带 `field`。
-* **AC-6.3**: 公共错误消息与属性不得包含 manifest JSON 正文、图片字节、Pydantic `input` / `ctx` 或内嵌正文的原始异常字符串。成员/路径上下文必须 canonical 化；不安全原始名称必须转义 C0/C1 并截断到 512 字符。
+  `MinerUParserError` 是**新增的库级公共根异常**，直接继承 `Exception`。`MinerUError` 与 `ResultDownloadError` 必须在保持各自现有继承关系与捕获语义不变的前提下，改为**同时**继承 `MinerUParserError`——这是纯加性变更，既有 `except MinerUError` / `except ResultDownloadError` 的行为不受影响。三条失败路径因此**互不继承**（`ResultExtractionError` 不是 `MinerUError` 的子类，反之亦然），但共享公共根，调用方可用 `except MinerUParserError` 一次性捕获全库失败。
+  > 该根异常定义在 `mineru_parser/errors.py`，由 `mineru_parser` 顶层导出。SPEC-001 / SPEC-002 的异常体系、AC 与 changelog **已同步回写**（见 §5 Phase 0）。
+
+* **AC-6.2**: `ArchiveError` 携带 `reason`（`invalid_zip` / `unsafe_member` / `duplicate_member` / `encrypted_member` / `unsupported_compression` / `corrupt_member` / `read_failed`）与 `member: str | None`；`ManifestError` 携带 `reason`（`not_found` / `ambiguous` / `invalid_encoding` / `invalid_json`）、`manifest_path: str | None`、`candidates: tuple[str, ...]`、`candidate_count: int`、`top_level_members: tuple[str, ...]`、`top_level_member_count: int`；`ValidationError` 携带 `manifest_path`、`category`（`unknown_block_type` / `missing_field` / `invalid_bbox` / `root_shape` / `other`）、`issues: tuple[ExtractionIssue, ...]`、`issue_count: int`；`LimitError` 携带 `resource`（`manifest` / `image` / `image_count` / `total_image_bytes` / `member_count`）、`limit`、`actual`、`member`；`ConfigurationError` 携带 `field`。
+  > `reason`、`resource`、`category` 都是**封闭枚举**，基数有界，可安全用作指标标签（AC-6.7）。未显式提供的字段默认值为 `None`、空元组或 0。
+* **AC-6.3**: 公共错误消息与属性不得包含 manifest JSON 正文、图片字节、Pydantic `input` / `ctx` / `msg` 中内嵌的输入值，或内嵌正文的原始异常字符串。成员/路径上下文必须 canonical 化；不安全原始名称必须转义 C0/C1 并截断到 512 字符。
+  > **结构化字段保真规则**：`member`、`manifest_path`、`candidates`、`top_level_members` 中的 canonical path 必须**完整未截断**——调用方需要它们做程序化定位与匹配。512 字符截断只适用于**日志渲染**，不得写入结构化字段。只有无法 canonical 化的原始名称才使用转义 + 截断后的诊断上下文。
 * **AC-6.4**: 校验失败、非法 JSON/编码必须使用 `from None` 或等价方式，使原始 Pydantic 异常不成为显式 `__cause__`；归档错误可以链 `BadZipFile` / `LargeZipFile` / `zlib.error` / `EOFError` / `OSError` 等不含正文的异常，但 `NotImplementedError` 与加密 `RuntimeError` 的原始消息可能包含成员名，必须使用 `from None`，且不得链包含文档正文的异常。
 * **AC-6.5**: 遥测名称必须为：成功日志 `mineru.extract`；失败日志 `mineru.extract.error`；指标回调失败日志 `mineru.metric.failed`；游标恢复失败日志 `mineru.extract.restore_failed`。指标必须为：`mineru.extract.total`、`mineru.extract.duration_ms`、`mineru.extract.pages`、`mineru.extract.images`、`mineru.extract.image_bytes`。
+  > 失败类指标的标签必须包含 `outcome` **与** 分类维度：归档 / manifest 类用 `reason`，限额类用 `resource`，校验类用 `category`。三者都是封闭枚举（AC-6.2），基数有界，且能让"上游返回错误页"（`reason="invalid_zip"`）与"归档构造异常"（`reason="unsafe_member"`）在同一张监控图上分开。
 * **AC-6.6**: `outcome` 必须取自 `success` / `config_error` / `archive_error` / `manifest_error` / `validation_error` / `limit_error` / `unexpected`，并由异常类型映射。指标必须在 `finally` 中恰好上报一次；失败时 `pages` / `images` / `image_bytes` 均为 0。`on_metric` / `correlation_id` 在构造 `Telemetry` 前校验失败时无法上报指标，但必须抛出 `ResultExtractionConfigurationError`。
-* **AC-6.7**: `on_metric` 抛出的任何异常必须被吞掉并记录 `mineru.metric.failed`，不得影响提取。`correlation_id` 必须附加到所有日志。指标标签只能包含 `outcome`，不得包含路径、成员名、文档内容或 `correlation_id`。
+* **AC-6.7**: `on_metric` 抛出的任何异常必须被吞掉并记录 `mineru.metric.failed`，不得影响提取。`correlation_id` 必须附加到所有日志。指标标签只能包含**封闭枚举**（`outcome`、`reason`、`resource`、`category`），不得包含路径、成员名、文档内容、异常消息或 `correlation_id`。
 * **AC-6.8**: 未知的非 `ResultExtractionError` 异常必须原样抛出，并记录 `outcome="unexpected"`；`MemoryError`、`KeyboardInterrupt`、`SystemExit` 不得被包装或吞掉。
 * **AC-6.9**: 公共错误消息使用英文；调用方必须基于异常类与 `reason` / `resource` 分支，不得依赖消息文本。
 
@@ -275,6 +303,8 @@ flowchart LR
 * **AC-7.3**: 相同字节与相同 `limits` 必须产生相同的 `path` 顺序、页面对象、异常类与 `reason`。
 * **AC-7.4**: 测试必须覆盖第 5 节的 AC 映射，包括损坏/加密/不支持压缩成员、限额、路径安全、流生命周期与遥测。
 * **AC-7.5**: 模块级 `TypeAdapter` 必须在导入时创建一次；不得在每次调用时重建，也不得共享可变状态。
+* **AC-7.6**: 必须包含基于 Hypothesis 的**性质测试**：对任意字节串与任意合法 `ExtractionLimits`，`extract_result` 要么抛出 `ResultExtractionError`，要么返回满足全部不变式的结果——`images[].path` 均已 canonical 化、互不重复、按字典序升序，`len(images[].bytes)` 等于对应成员的中央目录声明大小，`pages` 为 Pydantic 模型实例的嵌套列表，且任何路径都**不得产生部分结果、不得写入磁盘**。
+* **AC-7.7**: 必须包含**正文泄漏哨兵测试**：向 manifest 的各个字符串字段（块 `type`、文本内容、图片引用等）注入唯一哨兵串，断言抛出的异常的 `message`、`issues`、`__cause__`、`__context__` 与 `str(exc)` 中**都不包含该哨兵串**。该断言必须显式覆盖 `union_tag_invalid` 分支（AC-3.5）。
 
 ---
 
@@ -288,8 +318,9 @@ flowchart LR
 | :--- | :--- | :--- |
 | `extract_result` | 参数校验、流生命周期、编排 manifest/图片读取、构建结果、遥测 | 不下载、不重试、不落盘、不解码图片 |
 | `ExtractionLimits` | 持有解压后大小与数量上限，构造时校验 | 不执行读取、不持有调用状态 |
-| `_members`（内部） | canonical path、常规文件/符号链接判定、manifest 发现、有界成员读取 | 不解析 JSON、不解释 Schema |
-| `_manifest`（内部） | UTF-8/JSON 解码、`TypeAdapter` 校验、错误清洗 | 不读取图片、不发现成员 |
+| `canonicalize_member_path`（公共） | 路径 canonical 规则的**唯一实现**，供下游解析 manifest 引用 | 不访问 ZIP、不读取成员、不做匹配 |
+| `_members`（内部） | canonical path、常规文件/符号链接判定、manifest 发现、有界成员读取、EOCD 预扫描 | 不解析 JSON、不解释 Schema |
+| `_manifest`（内部） | UTF-8/JSON 解码、`TypeAdapter` 校验、错误清洗与分类 | 不读取图片、不发现成员 |
 | `_images`（内部） | 图片根目录解析、过滤、去重、排序、限额、有界读取 | 不解码图片、不做引用交叉校验 |
 | `Telemetry`（共享） | 日志 / 指标统一出口、回调异常隔离、`correlation_id` | 不影响主流程 |
 
@@ -298,6 +329,7 @@ flowchart LR
 ```text
 src/mineru_parser/
 ├── _telemetry.py               # 既有共享实现
+├── errors.py                   # MinerUParserError（库级公共根异常，新增）
 ├── schema/
 │   └── content_v2.py           # DocumentContentSchema（不修改）
 └── extractor/
@@ -306,10 +338,10 @@ src/mineru_parser/
     ├── errors.py               # ResultExtractionError 体系
     ├── limits.py               # ExtractionLimits / DEFAULT_EXTRACTION_LIMITS
     ├── models.py               # ExtractedResult / ExtractedImage / ExtractionIssue
-    └── _members.py             # 路径规范化、成员发现、有界读取
+    └── _members.py             # 路径规范化、成员发现、有界读取、EOCD 预扫描
 ```
 
-> Extractor 不依赖其他组件的 wire 模型，只依赖标准库、`pydantic` 与 `schema.content_v2`。`pydantic>=2.9` 已是项目依赖，无需新增第三方依赖。
+> Extractor 不依赖其他组件的 wire 模型，只依赖标准库、`pydantic`、`schema.content_v2` 与库级 `errors.MinerUParserError`。`pydantic>=2.9` 已是项目依赖，无需新增第三方运行时依赖。
 
 #### 提取时序
 
@@ -323,14 +355,15 @@ sequenceDiagram
 
     Caller->>EX: extract_result(stream, limits=...)
     EX->>EX: 校验 hooks / limits / stream；记录游标
+    EX->>EX: EOCD 预扫描：成员数量超限则提前拒绝
     EX->>ZF: ZipFile(stream, "r") + infolist()
     EX->>EX: 定位唯一顶层 *_content_list_v2.json
-    EX->>ZF: 有界读取 manifest
+    EX->>ZF: 有界读取 manifest（校验长度 == 声明大小）
     EX->>VA: validate_json(UTF-8 text)
     VA-->>EX: pages（Pydantic 模型）
     EX->>EX: 定位顶层 images/；去重 / 排序 / 限额
     loop 每张图片
-        EX->>ZF: 有界读取 image bytes
+        EX->>ZF: 有界读取 image bytes（校验长度 == 声明大小）
     end
     EX-->>Caller: { "pages": ..., "images": ... }
     Note over EX: finally：恢复游标、上报遥测；绝不关闭 stream
@@ -340,7 +373,7 @@ sequenceDiagram
 
 #### 提取限额
 
-`ExtractionLimits` 为不可变 dataclass（`frozen=True, slots=True`），在 `__post_init__` 中校验字段。
+`ExtractionLimits` 为不可变 dataclass（`frozen=True, slots=True`），构造时逐字段校验，校验规则见下表。
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -351,24 +384,11 @@ class ExtractionLimits:
     max_images: int = 10_000
     max_members: int = 100_000
 
-    def __post_init__(self) -> None:
-        for name in (
-            "max_manifest_bytes",
-            "max_image_bytes",
-            "max_total_image_bytes",
-            "max_images",
-            "max_members",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ResultExtractionConfigurationError(
-                    f"{name} must be a positive integer.",
-                    field=name,
-                )
-
 
 DEFAULT_EXTRACTION_LIMITS = ExtractionLimits()
 ```
+
+> 构造契约：任一字段不是**正整数**（含 `bool`）时，必须抛出 `ResultExtractionConfigurationError(field=<字段名>)`，且报错指明**第一个**不合法字段。校验在构造期完成，不延迟到读取期。
 
 | 字段 | 默认值 | 约束 | 作用 |
 | :--- | :---: | :--- | :--- |
@@ -380,7 +400,31 @@ DEFAULT_EXTRACTION_LIMITS = ExtractionLimits()
 
 > `max_total_image_bytes` 与 `max_image_bytes` 独立生效；即使单图小于 `max_image_bytes`，累计超过总上限仍会失败。`None` 只表示使用默认值，不表示无限制。
 >
-> `max_members` 在 `ZipFile` 解析中央目录之后检查；它能阻止后续遍历与图片发现，但无法回退 `zipfile` 已分配的 `ZipInfo` 内存。中央目录本身的规模仍受调用方提供的 ZIP 字节数上限约束，见 R-2。
+> `max_members` 采用**前置预检 + 后置兜底**双层检查：前置从流尾部读 EOCD 取条目总数，在构造 `ZipFile` 之前拒绝（AC-5.9）；后置在中央目录解析后复核 `len(infolist())`。前置预检无法确定时（未定位到 EOCD、ZIP64 标记、解析不自洽）跳过预检，由后置兜底。
+
+#### 端到端资源预算
+
+限额不是孤立数字，必须与上游下载环节和部署形态共同推导，否则无法解释"下载成功但提取被拒"。
+
+| 环节 | 限额 | 语义 | 默认值依据 |
+| :--- | :--- | :--- | :--- |
+| 上游下载 | `max_bytes = 50 MiB` | **压缩后**结果包字节 | 下载器既有配置（单包上限） |
+| 本组件 manifest | `max_manifest_bytes = 16 MiB` | 解压后清单字节 | 约 3,500 页文档的清单体积 |
+| 本组件图片总量 | `max_total_image_bytes = 256 MiB` | 解压后图片总字节 | 单次调用可承受的驻留量 |
+
+单次调用的峰值内存近似为：
+
+$$ M_{\text{peak}} \approx \texttt{max\_total\_image\_bytes} + \texttt{max\_manifest\_bytes} \times (1 + k_{\text{model}}) + M_{\text{zipinfo}} + M_{\text{result}} $$
+
+其中 $k_{\text{model}}$ 是 Pydantic 模型相对 JSON 文本的内存放大系数（由 R-3 的 `tracemalloc` 测试标定），$M_{\text{zipinfo}}$ 是中央目录 `ZipInfo` 的常驻开销，$M_{\text{result}}$ 是结果字典的自身开销。
+
+部署侧必须满足：
+
+$$ W \times M_{\text{peak}} \le M_{\text{container}} $$
+
+（$W$ = 并发调用数，$M_{\text{container}}$ = 每进程内存上限）。当前默认值按 $W = 4$、$M_{\text{container}} = 1\,\text{GiB}$ 推导，因此 **README 必须写明单次调用的峰值内存上限**，超出该形态的部署必须用 `ExtractionLimits` 覆盖 `max_total_image_bytes`。
+
+> **压缩侧与解压侧不是同一量纲**：下载器的 50 MiB 约束压缩后字节，Extractor 约束解压后字节。因此"下载成功但提取被限额拒绝"是**正常可达状态**（压缩比很高的包即可触发），不是错误。调用方应把 `ResultExtractionLimitError` 理解为"该结果包超出本环境的资源预算"，而不是"包坏了"。
 
 #### 输出结构
 
@@ -414,6 +458,8 @@ class ExtractionIssue(TypedDict):
 | `images[].path` | `str` | canonical 归档相对路径；恒为 `images/...` |
 | `images[].bytes` | `bytes` | ZIP 成员解压后的精确字节；不转码 |
 
+> `ExtractedImage` 的字段名 `bytes` 与内置类型同名。`TypedDict` 的注解在类体作用域求值时解析到内置 `bytes`，语义正确（`ExtractedImage.__annotations__ == {"path": str, "bytes": bytes}`）；保留该名称是为了与已发布的键名约定一致，实现时**不得**因此改写注解或引入 `from __future__ import annotations` 之外的处理。
+
 > 结果不包含 `manifest_path`；需要追踪清单文件名时使用 `mineru.extract` 日志字段，见 Q-2。
 
 #### 内部常量
@@ -424,31 +470,40 @@ class ExtractionIssue(TypedDict):
 | `_IMAGES_DIRNAME` | `"images"` | 图片根目录名 |
 | `_MAX_ISSUES_IN_ERROR` | `20` | `ValidationError.issues` 上限 |
 | `_MAX_CANDIDATES_IN_ERROR` | `20` | `ManifestError.candidates` 上限 |
-| `_MAX_CONTEXT_CHARS` | `512` | 日志 / 错误上下文字符上限 |
+| `_MAX_TOP_LEVEL_MEMBERS_IN_ERROR` | `20` | `ManifestError.top_level_members` 上限 |
+| `_MAX_CONTEXT_CHARS` | `512` | **日志**渲染的上下文字符上限（不作用于结构化字段） |
+| `_EOCD_TAIL_BYTES` | `64 * 1024` | EOCD 预扫描的尾部窗口大小 |
+| `_EOCD_MIN_SIZE` | `22` | EOCD 记录的最小长度 |
+| `_EOCD_SIGNATURE` | `b"PK\x05\x06"` | EOCD 记录签名 |
+| `_EOCD_HEADER_SIZE` | `22` | EOCD 记录固定长度（不含注释） |
+| `_UNSAFE_MSG_ERROR_TYPES` | `frozenset({"union_tag_invalid"})` | `msg` 会内嵌输入值、必须替换文案的 Pydantic 错误类型 |
 | `_SCHEMA` | `TypeAdapter(DocumentContentSchema)` | 模块级校验器 |
 
 #### 异常体系
 
 ```text
-ResultExtractionError
-├── ResultExtractionConfigurationError   # 流 / limits / hooks 非法
-├── ResultExtractionArchiveError         # ZIP 或成员结构 / 读取失败
-├── ResultExtractionManifestError        # manifest 缺失 / 多份 / JSON 结构错误
-├── ResultExtractionValidationError      # JSON 合法但不符合 DocumentContentSchema
-└── ResultExtractionLimitError           # 解压后大小 / 数量超限
+MinerUParserError
+├── MinerUError                 # 既有客户端异常体系（SPEC-001）
+├── ResultDownloadError         # 既有下载器异常体系（SPEC-002）
+└── ResultExtractionError
+    ├── ResultExtractionConfigurationError   # 流 / limits / hooks 非法
+    ├── ResultExtractionArchiveError         # ZIP 或成员结构 / 读取失败
+    ├── ResultExtractionManifestError        # manifest 缺失 / 多份 / JSON 结构错误
+    ├── ResultExtractionValidationError      # JSON 合法但不符合 DocumentContentSchema
+    └── ResultExtractionLimitError           # 解压后大小 / 数量超限
 ```
 
 | 异常 | 附加字段 | 说明 |
 | :--- | :--- | :--- |
 | `ResultExtractionConfigurationError` | `field: str \| None` | 构造参数、流能力或注入 callable 非法 |
 | `ResultExtractionArchiveError` | `reason`、`member: str \| None` | `invalid_zip`、`unsafe_member`、`duplicate_member`、`encrypted_member`、`unsupported_compression`、`corrupt_member`、`read_failed` |
-| `ResultExtractionManifestError` | `reason`、`manifest_path: str \| None`、`candidates: tuple[str, ...]`、`candidate_count: int` | `not_found`、`ambiguous`、`invalid_encoding`、`invalid_json`、`too_deep` |
-| `ResultExtractionValidationError` | `manifest_path: str`、`issues: tuple[ExtractionIssue, ...]`、`issue_count: int` | `issues` 只含 `loc` / `type` / `msg`；最多 20 条 |
+| `ResultExtractionManifestError` | `reason`、`manifest_path: str \| None`、`candidates: tuple[str, ...]`、`candidate_count: int`、`top_level_members: tuple[str, ...]`、`top_level_member_count: int` | `not_found`、`ambiguous`、`invalid_encoding`、`invalid_json` |
+| `ResultExtractionValidationError` | `manifest_path: str`、`category`、`issues: tuple[ExtractionIssue, ...]`、`issue_count: int` | `category` ∈ `unknown_block_type` / `missing_field` / `invalid_bbox` / `root_shape` / `other`；`issues` 只含 `loc` / `type` / `msg`；最多 20 条 |
 | `ResultExtractionLimitError` | `resource`、`limit: int`、`actual: int`、`member: str \| None` | `resource` ∈ `manifest` / `image` / `image_count` / `total_image_bytes` / `member_count` |
 
 > 未显式提供的字段默认值为 `None`、空元组或 0；例如 `ManifestError(reason="not_found")` 不要求候选字段，`LimitError(resource="image_count")` 的 `member` 为 `None`。
 >
-> `ResultExtractionError` 独立于 `MinerUError` 与 `ResultDownloadError`；三类失败路径可独立捕获。未来若需要统一根异常，可新增 `MinerUParserError` 并让三者继承，向后兼容。
+> `ResultExtractionError` 与 `MinerUError`、`ResultDownloadError` **互不继承**，三条失败路径可独立捕获；三者共享新增的公共根 `MinerUParserError`，调用方需要"全库失败"的一次性捕获时使用它。公共根是纯加性变更，既有 `except MinerUError` / `except ResultDownloadError` 的行为不变。
 
 ### 3.3 接口契约 (API Contracts)
 
@@ -462,17 +517,22 @@ def extract_result(
     on_metric: MetricHook | None = None,
     correlation_id: str | None = None,
 ) -> ExtractedResult: ...
+
+
+def canonicalize_member_path(raw: str) -> str | None: ...
 ```
 
 > 本组件是无状态函数，不引入 `ResultExtractor` 类。若未来需要复用配置或增加实例级状态，可在不破坏该函数的前提下追加薄门面，见 Q-8。
+>
+> `canonicalize_member_path` 是**公开**的路径规则实现，存在的唯一理由是让下游能以与 Extractor 完全一致的规则归一 manifest 中的图片引用（AC-4.13）。它必须与内部实现共用同一份代码，不得出现第二套规则。
 
 #### 公共 API 稳定性
 
 | 层级 | 名称 | 承诺 |
 | :--- | :--- | :--- |
-| **稳定** | `extract_result`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、异常体系 | 遵循 SemVer；大版本才允许破坏性变更 |
+| **稳定** | `extract_result`、`canonicalize_member_path`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、异常体系 | 遵循 SemVer；大版本才允许破坏性变更 |
 | **高级 / 可选** | `on_metric`、`correlation_id`、`ExtractionIssue` | 行为稳定，但可能新增字段 |
-| **内部** | canonical path 辅助函数、成员发现、常量 | 不承诺稳定性 |
+| **内部** | 成员发现、EOCD 预扫描、错误清洗辅助函数、常量 | 不承诺稳定性 |
 
 所有公共名称必须通过 `mineru_parser.extractor.__all__` 与顶层 `mineru_parser.__all__` 导出。
 
@@ -505,15 +565,17 @@ def extract_result(
 2. **独立性**：每次返回新的 dict、list 与 Pydantic 对象；不缓存、不共享。
 3. **页面**：`pages` 是 `DocumentContentSchema`，保持 manifest 中的页顺序；Pydantic 模型可被调用方继续使用或 `model_dump()`。
 4. **图片**：`images` 按 canonical path 升序；`bytes` 精确且不可变；`path` 是归档相对路径，不是磁盘绝对路径。
-5. **无交叉校验**：不保证 `image_source.path` 都能在 `images` 中找到。
-6. **无重试**：解析失败是终态；调用方可重新下载后再次调用。
+5. **图片字节的完整性以中央目录声明为准**：`len(images[].bytes)` 等于该成员的 `ZipInfo.file_size`。敌意归档可谎报 `file_size` 使内容被静默截断，因此**下游在使用图片前必须自行校验内容**（解码或哈希）；Extractor 不做该校验（Non-Goal）。
+6. **引用解析**：manifest 中的 `image_source.path` 是上游原始字符串，**不保证与 `images[].path` 逐字相等**。下游必须先用 `canonicalize_member_path()` 归一再匹配（AC-4.13）。
+7. **无交叉校验**：不保证 `image_source.path` 都能在 `images` 中找到；缺失引用与未引用图片都合法。
+8. **无重试**：解析失败是终态；调用方可重新下载后再次调用。
 
 #### 集成示例
 
 ```python
 import io
 
-from mineru_parser import extract_result
+from mineru_parser import canonicalize_member_path, extract_result
 
 # 输入契约：任意可读、可 seek 的二进制流，内容为标准 ZIP 归档
 stream = io.BytesIO(zip_bytes)
@@ -522,374 +584,196 @@ extracted = extract_result(stream)
 
 pages = extracted["pages"]          # list[list[LayoutElement]]
 images = extracted["images"]        # [{"path": "images/a.jpg", "bytes": b"..."}]
+
+# 解析 manifest 中的图片引用：必须用同一套 canonical 规则归一后再匹配
+by_path = {image["path"]: image for image in images}
+for page in pages:
+    for block in page:
+        source = getattr(block.content, "image_source", None)
+        if source is None:
+            continue
+        key = canonicalize_member_path(source.path)   # 可能返回 None
+        if key is not None and key in by_path:
+            ...  # 命中；注意图片字节可能已被上游截断，使用前自行校验
 ```
 
 > `zip_bytes` 的来源由调用方决定（上游交付、缓存命中、本地文件、测试夹具）；Extractor 不区分来源，也不参与下载或重试。
 
-> manifest 只在 ZIP 顶层被定位，因此图片 path 恒为 `images/...`。manifest 中的 `image_source.path` 通常是相对 manifest 目录的 `images/a.jpg`；由于 manifest 位于顶层，参考路径与输出 path 可直接对应，Extractor 不会重写引用。
+> manifest 只在 ZIP 顶层被定位，因此图片 path 恒为 `images/...`。manifest 中的 `image_source.path` 通常是相对 manifest 目录的 `images/a.jpg`；但它是**上游原始字符串**，未经 canonical 化，因此与输出的 `images[].path` **不保证逐字相等**。下游必须用 `canonicalize_member_path()` 归一后再匹配，Extractor 不会重写引用、也不做交叉校验。
 
 ### 3.4 提取算法 (Extraction Algorithm)
 
-以下伪代码描述控制流；异常映射与遥测字段在 3.6 / 3.7 补齐。
+本节描述**控制流契约**：每个阶段做什么、用什么判据、失败时抛出什么。实现方式（函数划分、循环写法、内部数据结构）由实现者决定，本 Spec 不约束；判定细则见 §3.5（成员发现与路径规则）与 §3.6（校验、限额与错误分类），遥测字段见 §3.7。
 
-```python
-_MANIFEST_SUFFIX = "_content_list_v2.json"
-_IMAGES_DIRNAME = "images"
-_MAX_ISSUES_IN_ERROR = 20
-_MAX_CANDIDATES_IN_ERROR = 20
-_MAX_CONTEXT_CHARS = 512
-_SCHEMA = TypeAdapter(DocumentContentSchema)
+#### 编排阶段
 
+| # | 阶段 | 动作 | 失败结果 | 依据 |
+| :---: | :--- | :--- | :--- | :--- |
+| 1 | 遥测构造 | 校验 `on_metric` / `correlation_id`，构造 `Telemetry` | `ConfigurationError(field="on_metric" / "correlation_id")` | AC-6.6 / AC-6.7 |
+| 2 | 限额解析 | `limits=None` 取默认值；否则校验类型 | `ConfigurationError(field="limits")` | AC-1.7 |
+| 3 | 流校验 | 校验二进制、可读、可 seek；记录起始游标 | `ConfigurationError(field="stream")` | AC-1.6 |
+| 4 | 成员数预检 | 读 EOCD 条目总数，超限立即拒绝（尚未打开归档） | `LimitError(resource="member_count")` | AC-5.9 |
+| 5 | 打开归档 | 只读模式打开 ZIP，解析中央目录 | `ArchiveError(reason="invalid_zip")` | AC-5.1 |
+| 6 | 成员数复核 | 中央目录条目数超限则拒绝 | `LimitError(resource="member_count")` | AC-5.9 |
+| 7 | manifest 发现 | 定位唯一顶层候选（不读数据） | `ManifestError(reason="not_found" / "ambiguous")`、`ArchiveError(reason="unsafe_member")` | AC-2.1 ~ AC-2.8 |
+| 8 | manifest 读取 | 有界读取并校验读取长度与声明一致 | `LimitError(resource="manifest")`、`ArchiveError(reason=...)` | AC-3.1 / AC-3.2 |
+| 9 | manifest 解析 | UTF-8 解码 → JSON 解析 → Schema 校验 | `ManifestError(reason="invalid_encoding" / "invalid_json")`、`ValidationError` | AC-3.3 ~ AC-3.5 |
+| 10 | 图片发现 | 过滤、去重、数量与声明总量预检 | `ArchiveError(reason="duplicate_member" / "unsafe_member")`、`LimitError(resource="image_count" / "total_image_bytes")` | AC-4.1 ~ AC-4.13 |
+| 11 | 图片读取 | 逐张有界读取并校验读取长度与声明一致 | `LimitError(resource="image")`、`ArchiveError(reason=...)` | AC-4.9 / AC-4.12 |
+| 12 | 交付 | 组装 `{"pages", "images"}` | — | AC-1.2 / AC-1.3 |
+| 13 | 收尾 | 恢复游标；上报一次指标 | 恢复失败仅告警，不改变主结果 | AC-1.5 / AC-6.6 |
 
-def extract_result(
-    stream: BinaryIO,
-    *,
-    limits: ExtractionLimits | None = None,
-    on_metric: MetricHook | None = None,
-    correlation_id: str | None = None,
-) -> ExtractedResult:
-    started = time.monotonic()
-    outcome = "unexpected"
-    telemetry = _build_telemetry(on_metric, correlation_id)
+> 阶段 1 早于阶段 2 / 3：`Telemetry` 必须先于 `limits` 与 `stream` 构造，使**配置错误也能上报指标**（AC-6.6）。阶段 4 早于阶段 5：成员数量必须在构造 `ZipFile` **之前**判定，避免中央目录内存先分配（AC-5.9）。
 
-    start_pos: int | None = None
-    manifest_path: str | None = None
-    pages: DocumentContentSchema = []
-    images: list[ExtractedImage] = []
+#### 参数校验契约
 
-    try:
-        limits = _resolve_limits(limits)
-        start_pos = _validate_stream(stream)
+| 校验对象 | 通过条件 | 失败 |
+| :--- | :--- | :--- |
+| `on_metric` | `None` 或可调用对象 | `ConfigurationError(field="on_metric")` |
+| `correlation_id` | `None` 或 `str` | `ConfigurationError(field="correlation_id")` |
+| `limits` | `None`（取 `DEFAULT_EXTRACTION_LIMITS`）或 `ExtractionLimits` 实例 | `ConfigurationError(field="limits")` |
 
-        try:
-            archive = zipfile.ZipFile(stream, "r")
-        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
-            raise ResultExtractionArchiveError(
-                "invalid ZIP archive",
-                reason="invalid_zip",
-            ) from exc
+`ExtractionLimits` 的**字段级**合法性由其构造期校验负责（§3.2），不在此重复。
 
-        with archive:
-            try:
-                infos = archive.infolist()
-            except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
-                raise ResultExtractionArchiveError(
-                    "invalid ZIP central directory",
-                    reason="invalid_zip",
-                ) from exc
+#### 流校验契约
 
-            if len(infos) > limits.max_members:
-                raise ResultExtractionLimitError(
-                    "ZIP member count exceeds limit",
-                    resource="member_count",
-                    limit=limits.max_members,
-                    actual=len(infos),
-                )
+| 检查 | 通过条件 | 失败 |
+| :--- | :--- | :--- |
+| 二进制性 | 不是 `io.TextIOBase` 实例 | `ConfigurationError(field="stream")` |
+| 能力存在 | 具备可调用的 `read` / `seek` / `tell` | 同上 |
+| 可读性 | `readable()` 存在且为真（不存在时视为通过） | 同上 |
+| 可定位性 | `seekable()` 存在且为真（不存在时视为通过） | 同上 |
+| 游标可读 | `tell()` 成功并返回整数 | 同上 |
 
-            manifest_path, manifest_info = _discover_manifest(infos)
-            raw = _read_member(
-                archive,
-                manifest_info,
-                limit=limits.max_manifest_bytes,
-                resource="manifest",
-                path=manifest_path,
-            )
-            pages = _validate_manifest(raw, manifest_path)
-            images = _collect_images(
-                archive,
-                infos,
-                limits=limits,
-            )
+通过后必须记录起始游标，供收尾阶段恢复（AC-1.5）。
 
-        outcome = "success"
-        telemetry.log(
-            "mineru.extract",
-            manifest=safe_context_path(manifest_path),
-            pages=len(pages),
-            images=len(images),
-            image_bytes=sum(len(image["bytes"]) for image in images),
-            duration_ms=(time.monotonic() - started) * 1000.0,
-            outcome=outcome,
-        )
-        return {"pages": pages, "images": images}
+#### 编排与收尾契约
 
-    except ResultExtractionError as exc:
-        outcome = _outcome_for(exc)
-        telemetry.log(
-            "mineru.extract.error",
-            level=logging.WARNING,
-            error_type=type(exc).__name__,
-            reason=getattr(exc, "reason", None),
-            member=getattr(exc, "member", None),
-            manifest_path=getattr(exc, "manifest_path", None),
-            resource=getattr(exc, "resource", None),
-            outcome=outcome,
-        )
-        raise
-    except BaseException as exc:
-        outcome = "unexpected"
-        telemetry.log(
-            "mineru.extract.error",
-            level=logging.ERROR,
-            error_type=type(exc).__name__,
-            outcome=outcome,
-        )
-        raise
-    finally:
-        if start_pos is not None:
-            try:
-                stream.seek(start_pos)
-            except Exception as exc:  # noqa: BLE001 - 恢复失败不覆盖主结果
-                telemetry.log(
-                    "mineru.extract.restore_failed",
-                    level=logging.WARNING,
-                    error_type=type(exc).__name__,
-                )
+1. **先校验后读取**：hooks、limits、stream 能力在打开 ZIP 前校验完毕。
+2. **响应必关闭**：`ZipFile` 通过上下文管理器关闭；传入的 `stream` 不会被关闭（AC-5.7）。
+3. **失败不交付**：任何异常都不会返回部分 `pages` 或 `images`（AC-3.10 / AC-4.11）。
+4. **声明大小是判据**：所有读取都是 `limit + 1` 的有界读取；`zipfile` 把读取钳制在中央目录声明的 `file_size` 内，因此**声明大小既是预检也是实际上界**，读取后再校验 `len(data) == info.file_size`。
+5. **遥测在收尾**：指标恰好上报一次；游标恢复失败只记录警告，不覆盖主结果。
+6. **异常不吞掉**：非 `ResultExtractionError` 的异常原样抛出（AC-6.8）。
 
-        telemetry.metric("mineru.extract.total", 1, {"outcome": outcome})
-        telemetry.metric(
-            "mineru.extract.duration_ms",
-            (time.monotonic() - started) * 1000.0,
-            {"outcome": outcome},
-        )
-        telemetry.metric(
-            "mineru.extract.pages",
-            len(pages) if outcome == "success" else 0,
-            {"outcome": outcome},
-        )
-        telemetry.metric(
-            "mineru.extract.images",
-            len(images) if outcome == "success" else 0,
-            {"outcome": outcome},
-        )
-        telemetry.metric(
-            "mineru.extract.image_bytes",
-            sum(len(image["bytes"]) for image in images)
-            if outcome == "success"
-            else 0,
-            {"outcome": outcome},
-        )
-```
+#### 异常 → `outcome` 映射
 
-辅助函数：
+| 异常类型 | `outcome` |
+| :--- | :--- |
+| `ResultExtractionConfigurationError` | `config_error` |
+| `ResultExtractionLimitError` | `limit_error` |
+| `ResultExtractionValidationError` | `validation_error` |
+| `ResultExtractionManifestError` | `manifest_error` |
+| `ResultExtractionArchiveError` | `archive_error` |
+| 其他未知异常 | `unexpected` |
 
-```python
-def _build_telemetry(
-    on_metric: MetricHook | None,
-    correlation_id: str | None,
-) -> Telemetry:
-    if on_metric is not None and not callable(on_metric):
-        raise ResultExtractionConfigurationError(
-            "on_metric must be callable",
-            field="on_metric",
-        )
-    if correlation_id is not None and not isinstance(correlation_id, str):
-        raise ResultExtractionConfigurationError(
-            "correlation_id must be a string",
-            field="correlation_id",
-        )
-    return Telemetry(on_metric=on_metric, correlation_id=correlation_id)
+#### 指标标签装配
 
+| 条件 | 标签集合 |
+| :--- | :--- |
+| `outcome == "success"` | 仅 `outcome` |
+| 失败 | `outcome` + `reason`（归档 / manifest 类）+ `resource`（限额类）+ `category`（校验类） |
 
-def _resolve_limits(limits: ExtractionLimits | None) -> ExtractionLimits:
-    if limits is None:
-        return DEFAULT_EXTRACTION_LIMITS
-    if not isinstance(limits, ExtractionLimits):
-        raise ResultExtractionConfigurationError(
-            "limits must be an ExtractionLimits instance",
-            field="limits",
-        )
-    return limits
-
-
-def _validate_stream(stream: BinaryIO) -> int:
-    if isinstance(stream, io.TextIOBase):
-        raise ResultExtractionConfigurationError(
-            "stream must be binary",
-            field="stream",
-        )
-    if not all(
-        callable(getattr(stream, name, None))
-        for name in ("read", "seek", "tell")
-    ):
-        raise ResultExtractionConfigurationError(
-            "stream must be readable and seekable",
-            field="stream",
-        )
-    try:
-        if hasattr(stream, "readable") and not stream.readable():
-            raise ValueError("not readable")
-        if hasattr(stream, "seekable") and not stream.seekable():
-            raise ValueError("not seekable")
-        return int(stream.tell())
-    except (OSError, ValueError, TypeError):
-        raise ResultExtractionConfigurationError(
-            "stream must be readable and seekable",
-            field="stream",
-        ) from None
-
-
-def _outcome_for(exc: ResultExtractionError) -> str:
-    if isinstance(exc, ResultExtractionConfigurationError):
-        return "config_error"
-    if isinstance(exc, ResultExtractionLimitError):
-        return "limit_error"
-    if isinstance(exc, ResultExtractionValidationError):
-        return "validation_error"
-    if isinstance(exc, ResultExtractionManifestError):
-        return "manifest_error"
-    if isinstance(exc, ResultExtractionArchiveError):
-        return "archive_error"
-    return "unexpected"
-```
-
-行为要点：
-
-1. **先校验后读取**：hooks、limits、stream 能力在打开 ZIP 前校验；`Telemetry` 先于 limits/stream 构造，使配置错误也能上报指标。
-2. **响应必关闭**：`ZipFile` 通过上下文管理器关闭；传入的 stream 不会被关闭。
-3. **失败不交付**：任何异常都不会返回部分 `pages` 或 `images`。
-4. **实际字节优先**：所有读取都是 `limit + 1` 的有界读取，声明大小只用于提前失败。
-5. **遥测在 finally**：指标恰好上报一次；游标恢复失败只记录警告。
+标签只允许封闭枚举，不得包含路径、成员名、文档内容、异常消息或 `correlation_id`（AC-6.7）。
 
 ### 3.5 成员发现与路径规则 (Member Discovery & Path Rules)
 
+本节给出**判定规则**：给定归档内容，如何唯一确定 manifest、图片根目录、canonical path 与常规文件。规则本身是契约；实现方式由实现者决定。
+
+#### 成员数量前置预检 (EOCD)
+
+`zipfile` 在构造时会完整解析中央目录并为每个成员分配 `ZipInfo`；若等到解析完成再检查 `max_members`，超大归档的中央目录内存**已经分配出去了**。因此成员数量必须在构造 `ZipFile` **之前**判定：EOCD (End-Of-Central-Directory) 记录固定位于归档尾部，从流尾部读一个 64 KiB 窗口即可拿到条目总数。
+
+| 预检环节 | 契约 |
+| :--- | :--- |
+| 读取窗口 | 从流尾部读取末尾最多 64 KiB；读取不得改变调用方游标语义（末尾统一恢复） |
+| EOCD 定位 | 在窗口内从后向前查找 EOCD 签名（`PK\x05\x06`）；EOCD 定长部分为 22 字节 |
+| 取值字段 | 从 EOCD 读取「本磁盘条目数」「中央目录总条目数」「归档注释长度」 |
+| 自洽性校验 | EOCD 必须位于窗口尾部，且「记录长度 + 注释长度」与窗口尾部一致；「本磁盘条目数」必须等于「总条目数」（单盘归档） |
+| ZIP64 标记 | 「总条目数」为 `0xFFFF` 时真实条目数位于 EOCD64 记录，本预检不可判定 |
+| 流尾部读取失败 | 预检不可判定 |
+
+| 判定结果 | 行为 |
+| :--- | :--- |
+| 条目数 > `max_members` | 抛出 `LimitError(resource="member_count", limit=max_members, actual=条目数)` |
+| 条目数 ≤ `max_members` | 放行 |
+| 预检不可判定 | **跳过预检**，不报错，交由中央目录解析后的后置检查兜底 |
+
+- 预检是**快速拒绝**，后置检查（中央目录条目数 > `max_members`）是**兜底**，两者都必须实现。
+- 预检不得引入假阳性：EOCD 定位失败、自洽性校验不通过（伪签名、多盘归档）或 ZIP64 标记时一律跳过，交由 `ZipFile` 判定。
+- 预检只读尾部窗口，不解压任何成员。
+- **已验证的行为**（对照中央目录实际条目数）：普通归档、带归档注释的归档、成员内容含伪 EOCD 签名的归档均能取到正确条目数；归档注释本身含 EOCD 签名时自洽性校验失败并跳过预检（安全行为——此情形 `zipfile` 自身也会报 `BadZipFile`）；非 ZIP 内容、空流、短于 22 字节的流均跳过预检；超过 64 KiB 尾部窗口的大归档仍能正确定位。
+
 #### Canonical path
 
-```python
-def canonical_member_path(raw: str) -> str | None:
-    if not raw or raw.startswith("/") or "\\" in raw:
-        return None
-    if any(
-        ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F
-        for ch in raw
-    ):
-        return None
-    parts: list[str] = []
-    for part in raw.split("/"):
-        if part in ("", "."):
-            continue
-        if part == "..":
-            return None
-        parts.append(part)
-    return "/".join(parts) or None
-```
+`canonicalize_member_path(raw: str) -> str | None` 是路径归一的**唯一实现**（AC-1.11），Extractor 内部与下游必须共用，不得出现第二套规则。
 
-规则：
+| 顺序 | 判定条件 | 结果 |
+| :---: | :--- | :--- |
+| 1 | `raw` 为空 | `None` |
+| 2 | `raw` 以 `/` 开头（绝对路径） | `None` |
+| 3 | `raw` 含 `\`（反斜杠） | `None` |
+| 4 | `raw` 含 NUL 或 C0/C1 控制字符（`U+0000`–`U+001F`、`U+007F`–`U+009F`） | `None` |
+| 5 | `raw` 按 `/` 切分后存在 `..` 段 | `None` |
+| 6 | 其余 | 按 `/` 切段，丢弃空段与 `.` 段，其余段以 `/` 连接；若结果为空串则返回 `None` |
+
+不变式：
 
 - 只把 `/` 当分隔符；拒绝反斜杠，避免 Windows 路径分隔符歧义。`images\a.jpg` 不属于 `images/`，会被忽略或按不安全名称处理。
 - 折叠空段与 `.`；拒绝绝对路径与任何 `..` 段。
 - 拒绝 NUL 与 C0/C1 控制字符，避免日志注入与下游路径歧义。
 - 不做 Unicode NFC/NFD 规范化，不做大小写转换；`Images/` 与 `images/` 不同。
+- 纯函数：同一原始名的两次归一结果恒等；不访问 ZIP、不读取任何成员。
 - 返回的 canonical path 用于输出 `images[].path`、去重、排序与错误上下文。
 
 #### 常规文件判定
 
-```python
-def is_regular_file(info: zipfile.ZipInfo) -> bool:
-    if info.is_dir() or (info.external_attr & 0x10):
-        return False
-    mode = (info.external_attr >> 16) & 0xFFFF
-    if mode == 0:
-        return True  # DOS 归档常见：没有 Unix mode
-    if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
-        return False
-    file_type = stat.S_IFMT(mode)
-    return file_type == 0 or stat.S_ISREG(mode)
-```
+| 判定条件 | 结果 |
+| :--- | :--- |
+| 目录项（名称以 `/` 结尾） | 非常规文件 |
+| MS-DOS 目录属性位（`external_attr & 0x10`）置位 | 非常规文件 |
+| Unix mode 的文件类型位为目录 / 符号链接 / 设备等非普通文件 | 非常规文件 |
+| Unix mode 为 0（归档未写 Unix mode，如 MS-DOS 归档） | 常规文件 |
+| Unix mode 只有权限位、没有文件类型位（如 `0o644`） | 常规文件 |
+| 其余 | 常规文件 |
 
-- 目录项（trailing `/`）、MS-DOS 目录位、Unix 目录/符号链接/设备类型都不算常规文件。
-- 仅有权限位（如 `0o644`）而没有文件类型位的成员按常规文件处理。
 - 无法识别的符号链接（归档未写 Unix mode）只能按普通文件读取；这是残余风险，见 R-9。
 
 #### 错误上下文路径
 
-```python
-def _looks_like_symlink(info: zipfile.ZipInfo) -> bool:
-    mode = (info.external_attr >> 16) & 0xFFFF
-    return stat.S_ISLNK(mode)
+| 用途 | 契约 |
+| :--- | :--- |
+| 日志渲染 | canonical path 已被规则拒绝控制字符，只需长度约束：超过 512 字符则截断并追加省略号 |
+| 无法 canonical 化的原始成员名 | 先把可打印 ASCII 之外的字符转义为 `\xNN` 形式，再按 512 字符截断 |
 
-
-def safe_context_path(path: str) -> str:
-    # canonical path 已拒绝控制字符，这里只做长度约束。
-    if len(path) <= _MAX_CONTEXT_CHARS:
-        return path
-    return path[:_MAX_CONTEXT_CHARS] + "…"
-
-
-def safe_member_context(raw: str) -> str:
-    # 仅用于无法 canonical 化的原始成员名：转义 C0/C1，再做长度约束。
-    escaped = "".join(
-        ch
-        if 0x20 <= ord(ch) <= 0x7E or ord(ch) > 0x9F
-        else f"\\x{ord(ch):02x}"
-        for ch in raw
-    )
-    if len(escaped) <= _MAX_CONTEXT_CHARS:
-        return escaped
-    return escaped[:_MAX_CONTEXT_CHARS] + "…"
-```
-
-- 内部流程始终使用完整 canonical path；构造异常字段与日志时使用 `safe_context_path`。
+- 内部流程始终使用完整 canonical path。
+- **结构化字段保真**：`member`、`manifest_path`、`candidates`、`top_level_members` 中的 canonical path **完整未截断**，供调用方程序化定位与匹配。
+- **日志渲染才截断**：512 字符上限只发生在写日志时。
+- 无法 canonical 化的原始名称使用转义 + 截断后的形式，避免日志注入与超长异常消息；这类名称本就无法安全 canonical 化，不进入结构化字段的 canonical 语义。
 - 返回给调用方的 `images[].path` 使用完整 canonical path，不截断。
-- 无法 canonical 化的原始名称使用 `safe_member_context`，避免日志注入与超长异常消息。
 
 #### Manifest 发现
 
-```python
-def _discover_manifest(
-    infos: list[zipfile.ZipInfo],
-) -> tuple[str, zipfile.ZipInfo]:
-    candidates: list[tuple[str, zipfile.ZipInfo]] = []
-
-    for info in infos:
-        raw = info.filename
-        # 搜索范围：仅 ZIP 顶层目录，原始名不含 "/"。
-        if "/" in raw:
-            continue
-        if not raw.endswith(_MANIFEST_SUFFIX):
-            continue
-
-        path = canonical_member_path(raw)
-        if path is None:
-            raise ResultExtractionArchiveError(
-                "unsafe manifest member name",
-                reason="unsafe_member",
-                member=safe_member_context(raw),
-            )
-        if not is_regular_file(info):
-            raise ResultExtractionArchiveError(
-                "manifest candidate is not a regular file",
-                reason="unsafe_member",
-                member=safe_context_path(path),
-            )
-        candidates.append((path, info))
-
-    if not candidates:
-        raise ResultExtractionManifestError(
-            "manifest not found",
-            reason="not_found",
-        )
-
-    if len(candidates) > 1:
-        paths = sorted(path for path, _ in candidates)
-        raise ResultExtractionManifestError(
-            f"multiple manifests found: {len(paths)}",
-            reason="ambiguous",
-            candidates=tuple(
-                safe_context_path(path)
-                for path in paths[:_MAX_CANDIDATES_IN_ERROR]
-            ),
-            candidate_count=len(paths),
-        )
-
-    return candidates[0]
-```
+| 步骤 | 动作 | 失败结果 |
+| :---: | :--- | :--- |
+| 1 | 遍历中央目录成员 | — |
+| 2 | 原始成员名含 `/` → 跳过：不计入顶层成员，也不计入候选 | — |
+| 3 | 顶层成员名加入顶层清单 | — |
+| 4 | 顶层成员名不以 `_content_list_v2.json` 结尾（大小写敏感）→ 跳过 | — |
+| 5 | 名称无法 canonical 化 → 失败关闭 | `ArchiveError(reason="unsafe_member")` |
+| 6 | 候选不是常规文件 → 失败关闭 | `ArchiveError(reason="unsafe_member")` |
+| 7 | 候选数为 0 → 失败关闭 | `ManifestError(reason="not_found")`，携带 `top_level_members`（≤ 20 条，按字典序）与 `top_level_member_count`（完整总数） |
+| 8 | 候选数 > 1 → 失败关闭 | `ManifestError(reason="ambiguous")`，`candidates` 为 canonical path 升序（≤ 20 条），`candidate_count` 为完整数量 |
+| 9 | 候选数 == 1 → 返回该候选的 canonical path 与其 `ZipInfo` | — |
 
 - 搜索范围由**原始成员名**判定：不含 `/` 的成员才算顶层成员，因此 `result/foo_content_list_v2.json`、`./foo_content_list_v2.json`、`__MACOSX/._foo_content_list_v2.json`、`/foo_content_list_v2.json` 一律不参与定位，也不计入候选数。
 - 顶层成员的 basename 即原始名本身，后缀匹配（大小写敏感）发生在该名称上。
 - 目录项 `foo_content_list_v2.json/` 名称以 `/` 结尾，不在顶层范围，不会成为候选。
 - 顶层候选名称若无法 canonical 化（反斜杠、NUL/C0/C1 控制字符），失败关闭 `unsafe_member`。
 - 同名重复的顶层成员会产生两个候选，统一报 `ambiguous`。
+- `not_found` 携带顶层成员清单与总数，用于分诊布局漂移。
+- 选中成员必须通过其 `ZipInfo` 打开，不得按名称二次查找（AC-2.5），避免重复名称把读取重定向到另一个成员。
+- 发现过程必须确定性：候选比较使用 canonical path 的字典序，归档成员顺序不得影响单候选的选择，也不得改变 `ambiguous` 的排序结果（AC-2.6）。
 
 #### 图片根目录
 
@@ -905,171 +789,36 @@ def _discover_manifest(
 
 #### 图片收集
 
-```python
-def _collect_images(
-    archive: zipfile.ZipFile,
-    infos: list[zipfile.ZipInfo],
-    *,
-    limits: ExtractionLimits,
-) -> list[ExtractedImage]:
-    image_root = f"{_IMAGES_DIRNAME}/"
-
-    entries: list[tuple[str, zipfile.ZipInfo]] = []
-    for info in infos:
-        raw = info.filename
-        path = canonical_member_path(raw)
-
-        if path is None:
-            if _IMAGES_DIRNAME in raw.split("/"):
-                raise ResultExtractionArchiveError(
-                    "unsafe image member name",
-                    reason="unsafe_member",
-                    member=safe_member_context(raw),
-                )
-            continue
-
-        if not path.startswith(image_root):
-            continue
-        if not is_regular_file(info):
-            if _looks_like_symlink(info):
-                raise ResultExtractionArchiveError(
-                    "symlink inside images directory",
-                    reason="unsafe_member",
-                    member=safe_context_path(path),
-                )
-            continue
-
-        entries.append((path, info))
-        if len(entries) > limits.max_images:
-            raise ResultExtractionLimitError(
-                "image count exceeds limit",
-                resource="image_count",
-                limit=limits.max_images,
-                actual=len(entries),
-            )
-
-    seen: set[str] = set()
-    for path, _ in entries:
-        if path in seen:
-            raise ResultExtractionArchiveError(
-                "duplicate image member",
-                reason="duplicate_member",
-                member=safe_context_path(path),
-            )
-        seen.add(path)
-
-    declared_total = sum(info.file_size for _, info in entries)
-    if declared_total > limits.max_total_image_bytes:
-        raise ResultExtractionLimitError(
-            "declared image bytes exceed limit",
-            resource="total_image_bytes",
-            limit=limits.max_total_image_bytes,
-            actual=declared_total,
-        )
-
-    entries.sort(key=lambda pair: pair[0])
-
-    images: list[ExtractedImage] = []
-    actual_total = 0
-    for path, info in entries:
-        data = _read_member(
-            archive,
-            info,
-            limit=limits.max_image_bytes,
-            resource="image",
-            path=safe_context_path(path),
-        )
-        actual_total += len(data)
-        if actual_total > limits.max_total_image_bytes:
-            raise ResultExtractionLimitError(
-                "actual image bytes exceed limit",
-                resource="total_image_bytes",
-                limit=limits.max_total_image_bytes,
-                actual=actual_total,
-                member=safe_context_path(path),
-            )
-        images.append({"path": path, "bytes": data})
-
-    return images
-```
+| 步骤 | 动作 | 失败结果 |
+| :---: | :--- | :--- |
+| 1 | 遍历中央目录成员 | — |
+| 2 | 原始名无法 canonical 化：若原始名的 `/` 分段中含 `images` → 失败关闭；否则忽略 | `ArchiveError(reason="unsafe_member")` |
+| 3 | canonical path 不以 `images/` 前缀开头 → 忽略 | — |
+| 4 | 候选不是常规文件：是符号链接 → 失败关闭；其他非常规文件（目录项等）→ 忽略 | `ArchiveError(reason="unsafe_member")` |
+| 5 | 计入候选集合 | — |
+| 6 | 候选数量超过 `max_images` → 立即失败关闭（`actual` 至少为 `max_images + 1`） | `LimitError(resource="image_count")` |
+| 7 | canonical path 重复 → 失败关闭 | `ArchiveError(reason="duplicate_member")` |
+| 8 | 声明总字节 `sum(file_size)` 超过 `max_total_image_bytes` → 失败关闭（**读取任何图片之前**） | `LimitError(resource="total_image_bytes")` |
+| 9 | 按 canonical path 升序排序 | — |
+| 10 | 逐张有界读取；累计实际字节超过上限 → 失败关闭 | `LimitError(resource="total_image_bytes")` |
 
 #### 有界成员读取
 
-```python
-def _read_member(
-    archive: zipfile.ZipFile,
-    info: zipfile.ZipInfo,
-    *,
-    limit: int,
-    resource: str,
-    path: str,
-) -> bytes:
-    if info.flag_bits & 0x1:
-        raise ResultExtractionArchiveError(
-            "encrypted member",
-            reason="encrypted_member",
-            member=path,
-        )
-
-    if info.file_size > limit:
-        raise ResultExtractionLimitError(
-            f"{resource} exceeds limit {limit}",
-            resource=resource,
-            limit=limit,
-            actual=info.file_size,
-            member=path,
-        )
-
-    try:
-        with archive.open(info) as member:
-            data = member.read(limit + 1)
-    except NotImplementedError:
-        # 原始消息可能包含成员名，切断异常链。
-        raise ResultExtractionArchiveError(
-            "unsupported compression method",
-            reason="unsupported_compression",
-            member=path,
-        ) from None
-    except RuntimeError as exc:
-        if "encrypted" in str(exc).lower():
-            # 原始消息包含文件名，切断异常链。
-            raise ResultExtractionArchiveError(
-                "encrypted member",
-                reason="encrypted_member",
-                member=path,
-            ) from None
-        raise
-    except (
-        zipfile.BadZipFile,
-        zipfile.LargeZipFile,
-        zlib.error,
-        EOFError,
-    ) as exc:
-        raise ResultExtractionArchiveError(
-            "corrupt member",
-            reason="corrupt_member",
-            member=path,
-        ) from exc
-    except OSError as exc:
-        raise ResultExtractionArchiveError(
-            "member read failed",
-            reason="read_failed",
-            member=path,
-        ) from exc
-
-    if len(data) > limit:
-        raise ResultExtractionLimitError(
-            f"{resource} exceeds limit {limit}",
-            resource=resource,
-            limit=limit,
-            actual=len(data),
-            member=path,
-        )
-
-    return data
-```
+| 步骤 | 判定 | 结果 |
+| :---: | :--- | :--- |
+| 1 | 成员被加密（`flag_bits & 0x1`） | `ArchiveError(reason="encrypted_member")` |
+| 2 | 声明大小 `file_size` > 限额 | `LimitError(resource=..., limit=..., actual=file_size, member=path)` |
+| 3 | 通过 `archive.open(info)` 打开，并读取至多 `limit + 1` 字节 | — |
+| 4 | 不支持的压缩方法 | `ArchiveError(reason="unsupported_compression")`，**切断异常链** |
+| 5 | 加密相关的运行时错误 | `ArchiveError(reason="encrypted_member")`，**切断异常链** |
+| 6 | CRC / 解压 / 截断 / `LargeZipFile` | `ArchiveError(reason="corrupt_member")`，可链原异常 |
+| 7 | 底层流 I/O 失败 | `ArchiveError(reason="read_failed")`，可链原异常 |
+| 8 | 读取长度 > 限额 | `LimitError(...)`，冗余断言（不可达） |
+| 9 | 读取长度 ≠ 声明大小 | `ArchiveError(reason="corrupt_member")` |
 
 > 必须使用 `archive.open(info)` 而不是 `archive.read(name)`：前者可以绑定具体 `ZipInfo` 且有界读取，后者按名称查找且会一次性读完整个成员。
+>
+> 步骤 4 / 5 必须切断异常链：原始消息可能包含成员名（AC-6.4）。
 
 ### 3.6 校验、限额与错误分类 (Validation, Limits & Error Classification)
 
@@ -1078,120 +827,121 @@ def _read_member(
 ```text
 1. 校验 on_metric / correlation_id，构造 Telemetry
 2. 校验 limits / stream，记录游标
-3. zipfile.ZipFile(stream, "r")；解析中央目录
-4. 发现唯一顶层 manifest（仅扫描顶层成员名，不读数据）
-5. 有界读取 manifest
-6. UTF-8（去可选 BOM）解码
-7. json_invalid / RecursionError 分类；否则 TypeAdapter[DocumentContentSchema]
-8. 计算图片根目录；过滤、去重、排序
-9. 数量与声明总字节预检
-10. 逐张有界读取，累计实际总字节
-11. 构造 {"pages", "images"}，恢复游标，上报遥测
+3. EOCD 预扫描：成员数量超限则在构造 ZipFile 之前拒绝
+4. zipfile.ZipFile(stream, "r")；解析中央目录
+5. 后置复核成员数量（len(infolist())）
+6. 发现唯一顶层 manifest（仅扫描顶层成员名，不读数据）
+7. 有界读取 manifest；校验读取长度 == 声明大小
+8. UTF-8（去可选 BOM）解码
+9. json_invalid 分类（含解析器递归上限）；否则 TypeAdapter[DocumentContentSchema]
+10. 计算图片根目录；过滤、去重、排序
+11. 数量与声明总字节预检
+12. 逐张有界读取；校验读取长度 == 声明大小；累计实际总字节
+13. 构造 {"pages", "images"}，恢复游标，上报遥测
 ```
 
 #### Manifest 校验
 
-```python
-from pydantic import ValidationError
+| 步骤 | 动作 | 失败结果 |
+| :---: | :--- | :--- |
+| 1 | 以 UTF-8 解码，允许去除一个可选 UTF-8 BOM；不猜测其他编码 | `ManifestError(reason="invalid_encoding", manifest_path=path)` |
+| 2 | 用模块级 `TypeAdapter[DocumentContentSchema]` 的 `validate_json` 完成 JSON 与 Schema 校验 | — |
+| 3 | 错误明细含 `json_invalid` 类型（JSON 语法错误 / 尾随数据 / 解析器递归上限） | `ManifestError(reason="invalid_json", manifest_path=path)` |
+| 4 | 错误明细不含 `json_invalid`：按下方清洗规则生成 `issues` 与 `category` | `ValidationError(manifest_path=path, category=..., issues=..., issue_count=...)` |
+| 5 | 校验阶段递归耗尽（理论兜底） | `ManifestError(reason="invalid_json", manifest_path=path)` |
 
-def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise ResultExtractionManifestError(
-            "manifest is not valid UTF-8",
-            reason="invalid_encoding",
-            manifest_path=safe_context_path(path),
-        ) from None
+##### 错误明细清洗
 
-    try:
-        return _SCHEMA.validate_json(text)
-    except ValidationError as exc:
-        details = exc.errors(
-            include_url=False,
-            include_context=False,
-            include_input=False,
-        )
+| 保留 | 丢弃 | 说明 |
+| :--- | :--- | :--- |
+| `loc` | — | Pydantic 的定位路径，逐条保留 |
+| `type` | — | Pydantic 错误类型标识 |
+| `msg` | — | 错误文本；内嵌输入值的类型必须替换为固定文案（见下） |
+| — | `input` | 可能内嵌 manifest 正文 |
+| — | `ctx` | 可能内嵌输入值 |
+| — | `url` | 错误文档 URL，对调用方无价值 |
 
-        if any(detail.get("type") == "json_invalid" for detail in details):
-            raise ResultExtractionManifestError(
-                "manifest is not valid JSON",
-                reason="invalid_json",
-                manifest_path=safe_context_path(path),
-            ) from None
+- 清洗在**生成错误明细的阶段**完成（不含 URL / `input` / `ctx`），而不是事后过滤。
+- `issues` 最多 20 条（`_MAX_ISSUES_IN_ERROR`）；`issue_count` 保留**完整**错误条数。
 
-        issues = tuple(
-            {
-                "loc": tuple(detail.get("loc", ())),
-                "type": str(detail.get("type", "")),
-                "msg": str(detail.get("msg", "")),
-            }
-            for detail in details[:_MAX_ISSUES_IN_ERROR]
-        )
-        raise ResultExtractionValidationError(
-            "manifest does not match content_v2 schema",
-            manifest_path=safe_context_path(path),
-            issues=issues,
-            issue_count=len(details),
-        ) from None
-    except RecursionError:
-        raise ResultExtractionManifestError(
-            "manifest nesting is too deep",
-            reason="too_deep",
-            manifest_path=safe_context_path(path),
-        ) from None
-```
+##### `msg` 二次脱敏
 
-- `exc.errors(include_url=False, include_context=False, include_input=False)` 在生成阶段就不包含错误文档 URL、`input` 与 `ctx`。
-- `json_invalid` 覆盖 JSON 语法错误与尾随数据；UTF-8 编码错误已在前面单独处理。
-- `RecursionError` 可能由 JSON 解析或模型校验触发，统一归类为 `too_deep`。
-- `from None` 保证原始 `ValidationError` 不作为显式 `__cause__` 暴露正文。
+| Pydantic 错误类型 | 处理 |
+| :--- | :--- |
+| `_UNSAFE_MSG_ERROR_TYPES` 中的类型（当前仅 `union_tag_invalid`） | 替换为**不含任何输入值**的固定文案 |
+| 其余类型 | 保留 Pydantic 原始 `msg` |
+
+> `union_tag_invalid` 的原始 `msg` 形如 `Input tag '<原始值>' found using 'type' does not match any of the expected tags: ...`，直接保留会把 manifest 正文原样带进公共异常属性。
+
+##### `category` 归一
+
+按下列顺序判定，命中即止：
+
+| 顺序 | 判定条件 | `category` | 含义 |
+| :---: | :--- | :--- | :--- |
+| 1 | 错误类型集合含 `union_tag_invalid` | `unknown_block_type` | 未知块类型 → 升级 Schema |
+| 2 | 任一错误的 `loc` 中出现 `bbox` 段 | `invalid_bbox` | 非法 `bbox` |
+| 3 | 任一错误的 `loc` 为空（根级错误） | `root_shape` | 根结构不是 `list[list[LayoutElement]]` |
+| 4 | 错误类型集合含 `missing` | `missing_field` | 缺少必填字段 |
+| 5 | 其余 | `other` | 其他 Schema 偏差 |
+
+- `category` 回答的是"调用方该做什么"——升级 Schema（`unknown_block_type`）还是拒收该文档（其余）；调用方**不得**去匹配 Pydantic 原始 type 字符串（AC-6.9）。
+- `json_invalid` 覆盖 JSON 语法错误、尾随数据**与解析器递归上限**（深层嵌套 JSON 在此归类；本 Spec 不设独立的 `too_deep` 原因，见 AC-3.4）。UTF-8 编码错误已在前面单独处理。
+- 校验失败与非法 JSON / 编码错误必须使用 `from None` 或等价方式，使原始 `ValidationError` 不成为显式 `__cause__`（AC-6.4）。
+- `manifest_path` 为**完整未截断**的 canonical path（AC-6.3）。
 
 #### 限额检查点
 
-| 检查 | 时机 | 使用值 | 异常 |
-| :--- | :--- | :--- | :--- |
-| ZIP 成员数量 | 打开中央目录后 | `len(infolist())` | `LimitError(resource="member_count")` |
-| manifest 声明大小 | 解压前 | `ZipInfo.file_size` | `LimitError(resource="manifest")` |
-| manifest 实际大小 | 有界读取后 | `len(data)` | `LimitError(resource="manifest")` |
-| 图片数量 | 构建图片条目列表时 | 已观察文件数（至少 `max_images + 1`） | `LimitError(resource="image_count")` |
-| 图片声明总大小 | 读取任何图片前 | `sum(file_size)` | `LimitError(resource="total_image_bytes")` |
-| 单图声明大小 | 每张解压前 | `file_size` | `LimitError(resource="image")` |
-| 单图实际大小 | 每张有界读取后 | `len(data)` | `LimitError(resource="image")` |
-| 图片实际总大小 | 每张读取后 | 累计 `len(data)` | `LimitError(resource="total_image_bytes")` |
+| 检查 | 时机 | 使用值 | 异常 | 有效性 |
+| :--- | :--- | :--- | :--- | :--- |
+| ZIP 成员数量（前置） | 构造 `ZipFile` 之前，读 EOCD | EOCD 条目总数 | `LimitError(resource="member_count")` | ✅ 快速拒绝 |
+| ZIP 成员数量（后置） | 中央目录解析后 | `len(infolist())` | `LimitError(resource="member_count")` | ✅ 兜底 |
+| manifest 声明大小 | 解压前 | `ZipInfo.file_size` | `LimitError(resource="manifest")` | ✅ 实际上界 |
+| manifest 读取长度 | 有界读取后 | `len(data) == file_size` | `ArchiveError(reason="corrupt_member")` | ✅ 完整性 |
+| 图片数量 | 构建图片条目列表时 | 已观察文件数（至少 `max_images + 1`） | `LimitError(resource="image_count")` | ✅ |
+| 图片声明总大小 | 读取任何图片前 | `sum(file_size)` | `LimitError(resource="total_image_bytes")` | ✅ 实际上界 |
+| 单图声明大小 | 每张解压前 | `file_size` | `LimitError(resource="image")` | ✅ 实际上界 |
+| 单图读取长度 | 每张有界读取后 | `len(data) == file_size` | `ArchiveError(reason="corrupt_member")` | ✅ 完整性 |
+| manifest 实际大小 | 有界读取后 | `len(data)` | `LimitError(resource="manifest")` | ⚠️ 冗余断言（不可达） |
+| 单图实际大小 | 每张有界读取后 | `len(data)` | `LimitError(resource="image")` | ⚠️ 冗余断言（不可达） |
+| 图片实际总大小 | 每张读取后 | 累计 `len(data)` | `LimitError(resource="total_image_bytes")` | ⚠️ 冗余断言（不可达） |
 
-> 所有限额都失败关闭：不会“跳过超限图片继续返回其余结果”。声明大小可以提前失败，但 `file_size` 可能不准确；实际字节始终是最终判据。
+> **为什么后三项是冗余断言**：`zipfile` 的 `ZipExtFile` 把每次读取钳制在中央目录声明的 `file_size` 之内，故 `len(data) ≤ file_size` 恒成立；预检已保证 `file_size ≤ limit`，因此"实际字节超限"分支不可达。**声明大小既是预检也是实际上界**，有效闸门是"声明大小"三项；后三项保留只为防御 `zipfile` 行为变化，并提醒实现者不得依赖它们。
+>
+> 所有限额都失败关闭：不会"跳过超限图片继续返回其余结果"。声明大小可以提前失败，但 `file_size` 可能不准确——正因如此，读取长度必须与声明一致（不一致 → `corrupt_member`），而敌意归档谎报 `file_size` 造成的**静默截断**是 Extractor 无法自行识别的残余风险（R-12）。
 
 #### 错误分类
 
 | 阶段 | 情况 | 异常 |
 | :--- | :--- | :--- |
 | 配置 | 非法 stream / limits / hooks | `ResultExtractionConfigurationError` |
+| EOCD 预扫描 | 成员数量 > `max_members` | `ResultExtractionLimitError(resource="member_count")` |
 | 打开 ZIP | `BadZipFile` / `LargeZipFile` / `OSError` | `ResultExtractionArchiveError(reason="invalid_zip")` |
-| 打开 ZIP | 成员数量 > `max_members` | `ResultExtractionLimitError(resource="member_count")` |
+| 打开 ZIP | 后置复核成员数量 > `max_members` | `ResultExtractionLimitError(resource="member_count")` |
 | Manifest 发现 | 零个候选 | `ResultExtractionManifestError(reason="not_found")` |
 | Manifest 发现 | 多个候选 | `ResultExtractionManifestError(reason="ambiguous")` |
 | Manifest 发现 | 不安全候选 / 候选是符号链接 | `ResultExtractionArchiveError(reason="unsafe_member")` |
 | Manifest 读取 | 加密 | `ResultExtractionArchiveError(reason="encrypted_member")` |
 | Manifest 读取 | 不支持压缩 | `ResultExtractionArchiveError(reason="unsupported_compression")` |
-| Manifest 读取 | CRC / 解压 / 截断 | `ResultExtractionArchiveError(reason="corrupt_member")` |
+| Manifest 读取 | CRC / 解压 / 截断 / 读取长度与声明不符 | `ResultExtractionArchiveError(reason="corrupt_member")` |
 | Manifest 读取 | 底层流 I/O | `ResultExtractionArchiveError(reason="read_failed")` |
 | Manifest 读取 | 超过 `max_manifest_bytes` | `ResultExtractionLimitError(resource="manifest")` |
 | Manifest 解码 | 非法 UTF-8 | `ResultExtractionManifestError(reason="invalid_encoding")` |
-| Manifest 解析 | 非法 JSON | `ResultExtractionManifestError(reason="invalid_json")` |
-| Manifest 解析 | 嵌套过深 | `ResultExtractionManifestError(reason="too_deep")` |
-| Schema | 不符合 `DocumentContentSchema` | `ResultExtractionValidationError` |
+| Manifest 解析 | 非法 JSON / 尾随数据 / 嵌套过深 | `ResultExtractionManifestError(reason="invalid_json")` |
+| Schema | 不符合 `DocumentContentSchema` | `ResultExtractionValidationError`（带 `category`） |
 | 图片发现 | canonical path 重复 | `ResultExtractionArchiveError(reason="duplicate_member")` |
 | 图片发现 | 不安全路径 / 符号链接 | `ResultExtractionArchiveError(reason="unsafe_member")` |
-| 图片读取 | 加密 / 不支持压缩 / 损坏 / I/O | `ResultExtractionArchiveError(reason=...)` |
+| 图片读取 | 加密 / 不支持压缩 / 损坏 / 读取长度与声明不符 / I/O | `ResultExtractionArchiveError(reason=...)` |
 | 图片读取 | 数量 / 单图 / 总量超限 | `ResultExtractionLimitError(resource=...)` |
 | 未知 | 其他异常 | 原样抛出；`outcome="unexpected"` |
 
 #### 错误清洗
 
 - `ValidationError.issues` 只保留 Pydantic 的 `loc`、`type`、`msg`，丢弃 `input`、`ctx`、`url`；最多 20 条，`issue_count` 保留完整数量。
-- `ManifestError.candidates` 最多 20 条 canonical path（必要时用 `safe_context_path` 截断），`candidate_count` 保留完整数量。
-- 日志与异常上下文中的 canonical path 使用 `safe_context_path` 截断到 512 字符；无法 canonical 化的原始名称使用 `safe_member_context`，先转义 C0/C1 再截断。返回给调用方的 `images[].path` 不截断。
+- `msg` 必须二次脱敏：`union_tag_invalid` 等会内嵌输入值的类型一律替换为固定文案（AC-3.5、AC-7.7）。
+- `ManifestError.candidates` 最多 20 条 canonical path，`candidate_count` 保留完整数量；`not_found` 另带 `top_level_members`（最多 20 条）与 `top_level_member_count`。
+- **结构化字段保真**：`member`、`manifest_path`、`candidates`、`top_level_members` 中的 canonical path **完整未截断**，供调用方程序化定位与匹配；512 字符截断只发生在**日志渲染**。无法 canonical 化的原始名称先转义 C0/C1 再截断。
+- 返回给调用方的 `images[].path` 使用完整 canonical path，不截断。
 - 校验错误与非法 JSON/编码错误使用 `from None`；归档错误只链 `BadZipFile` / `zlib.error` 等不含正文的异常。
 - 不得在错误消息中拼接 manifest 片段、图片字节或 `str(pydantic_validation_error)`。
 
@@ -1202,14 +952,14 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 类型 | 名称 | 标签 / 字段 |
 | :--- | :--- | :--- |
 | 日志 | `mineru.extract` | `manifest`（canonical path）、`pages`、`images`、`image_bytes`、`duration_ms`、`outcome` |
-| 日志 | `mineru.extract.error` | `error_type`、`reason`、`member`、`manifest_path`、`resource`、`outcome` |
+| 日志 | `mineru.extract.error` | `error_type`、`reason`、`member`、`manifest_path`、`resource`、`category`、`outcome` |
 | 日志 | `mineru.extract.restore_failed` | `error_type` |
 | 日志 | `mineru.metric.failed` | `metric_name`、`error_type` |
-| 指标 | `mineru.extract.total` | `outcome` |
-| 指标 | `mineru.extract.duration_ms` | `outcome` |
-| 指标 | `mineru.extract.pages` | `outcome` |
-| 指标 | `mineru.extract.images` | `outcome` |
-| 指标 | `mineru.extract.image_bytes` | `outcome` |
+| 指标 | `mineru.extract.total` | `outcome`（+ 失败时 `reason` / `resource` / `category`） |
+| 指标 | `mineru.extract.duration_ms` | `outcome`（+ 失败时 `reason` / `resource` / `category`） |
+| 指标 | `mineru.extract.pages` | `outcome`（+ 失败时 `reason` / `resource` / `category`） |
+| 指标 | `mineru.extract.images` | `outcome`（+ 失败时 `reason` / `resource` / `category`） |
+| 指标 | `mineru.extract.image_bytes` | `outcome`（+ 失败时 `reason` / `resource` / `category`） |
 
 `outcome` 枚举（低基数，禁止自由文本）：
 
@@ -1226,8 +976,8 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 - `total` 使用 counter 语义（每次调用值 1）；`duration_ms` / `pages` / `images` / `image_bytes` 使用分布量，单位分别为毫秒、页数、张数、字节。
 - 指标必须在 `finally` 中恰好上报一次；失败时 `pages` / `images` / `image_bytes` 为 0，避免把部分中间结果当成成功产物。
 - `on_metric` / `correlation_id` 在 `Telemetry` 构造前校验；这两个参数本身非法时无法上报指标，但必须抛出 `ResultExtractionConfigurationError`。
-- 指标标签不得包含 manifest path、图片 path、成员名、文档内容或 `correlation_id`；这些信息只允许出现在日志字段中。
-- 日志与异常上下文中的路径必须 canonical 化并截断到 512 字符；不得记录 manifest 正文、图片字节、图片 base64 或 Pydantic `input`。
+- **指标标签只允许封闭枚举**：`outcome`、`reason`、`resource`、`category`。三者基数有界（分别不超过 7 / 5 / 5 个取值），能直接支撑分诊——例如 `reason="invalid_zip"` 的突增指向上游返回了错误页，`reason="unsafe_member"` 的突增指向可疑归档。标签**不得**包含 manifest path、图片 path、成员名、文档内容、异常消息或 `correlation_id`；这些信息只允许出现在日志字段中。
+- 日志中的路径必须 canonical 化并截断到 512 字符；**异常的结构化字段不截断**（AC-6.3）。不得记录 manifest 正文、图片字节、图片 base64 或 Pydantic `input`。
 
 ---
 
@@ -1242,8 +992,8 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 非 ZIP 内容 | HTML 错误页 / 纯文本 | `extract_result` | `ZipFile` 解析失败 | `ArchiveError(reason="invalid_zip")` |
 | ZIP 损坏 / 截断 | 中央目录或成员数据损坏 | `extract_result` | 失败关闭 | `ArchiveError(reason="invalid_zip")` / `corrupt_member` |
 | ZIP64 / 超大归档 | 超过普通 ZIP 限制 | `extract_result` | `LargeZipFile` 或限额 | `ArchiveError(reason="invalid_zip")` / `LimitError` |
-| ZIP 成员过多 | 成员数 > `max_members` | 打开中央目录后 | 不进入 manifest 发现 | `LimitError(resource="member_count")` |
-| 无 manifest | ZIP 顶层没有匹配后缀的文件 | 发现阶段 | 失败关闭 | `ManifestError(reason="not_found")` |
+| ZIP 成员过多 | 成员数 > `max_members` | EOCD 前置预检（兜底：中央目录解析后） | 构造 `ZipFile` 之前即拒绝，不分配中央目录内存 | `LimitError(resource="member_count")` |
+| 无 manifest | ZIP 顶层没有匹配后缀的文件 | 发现阶段 | 失败关闭；携带顶层成员清单与总数供分诊 | `ManifestError(reason="not_found")` |
 | 多份 manifest | 顶层两份或以上匹配文件 | 发现阶段 | 不猜测，失败关闭 | `ManifestError(reason="ambiguous")` |
 | 重复 manifest 成员 | 同名顶层成员出现两次 | 发现阶段 | 按多个候选处理 | `ManifestError(reason="ambiguous")` |
 | manifest 位于子目录 | `result/doc_content_list_v2.json` | 发现阶段 | 不在顶层范围，忽略且不回退 | `ManifestError(reason="not_found")` |
@@ -1257,8 +1007,10 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | manifest 实际超限 | 声明撒谎，实际读取超过上限 | 读取中 | 有界读取后失败 | `LimitError(resource="manifest")` |
 | manifest 非 UTF-8 | 二进制 / UTF-16 / 非法字节 | 解码阶段 | 不猜测编码 | `ManifestError(reason="invalid_encoding")` |
 | manifest 非法 JSON | 语法错误 / 尾随数据 | 解析阶段 | 失败关闭 | `ManifestError(reason="invalid_json")` |
-| manifest 嵌套过深 | `RecursionError` | 解析阶段 | 失败关闭 | `ManifestError(reason="too_deep")` |
-| Schema 不匹配 | 未知 block type / 缺字段 / 根结构错误 | 校验阶段 | 清洗错误并失败 | `ValidationError` |
+| manifest 嵌套过深 | JSON 解析器递归上限 | 解析阶段 | 与语法错误同归 `invalid_json`（不设 `too_deep`） | `ManifestError(reason="invalid_json")` |
+| Schema 不匹配 | 未知 block type / 缺字段 / 根结构错误 / bbox 非法 | 校验阶段 | 清洗错误并失败；给出 `category` 供调用方分支 | `ValidationError` |
+| Schema 漂移 | 上游新增 block type | 校验阶段 | `category="unknown_block_type"`，提示升级 Schema | `ValidationError` |
+| 块 type 内嵌正文 | `type` 字段含敏感文本 | 校验阶段 | `msg` 二次脱敏，正文不得进入异常属性 | `ValidationError`（无正文） |
 | 空文档 | JSON 为 `[]` | 校验阶段 | 合法 | `pages=[]` |
 | 空页 | JSON 含 `[[]]` | 校验阶段 | 合法 | 对应页为空列表 |
 | 已知块有额外字段 | Pydantic 默认 `extra="ignore"` | 校验阶段 | 忽略额外字段 | 成功 |
@@ -1277,7 +1029,10 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 图片声明总量超限 | `sum(file_size) > max_total_image_bytes` | 读取任何图片前 | 失败关闭 | `LimitError(resource="total_image_bytes")` |
 | 单图声明超限 | `file_size > max_image_bytes` | 单图读取前 | 不进行解压 | `LimitError(resource="image")` |
 | 单图实际超限 | 声明撒谎，实际超过上限 | 单图读取中 | 有界读取后失败 | `LimitError(resource="image")` |
-| 图片实际总量超限 | 累计实际字节超过上限 | 每张读取后 | 失败关闭 | `LimitError(resource="total_image_bytes")` |
+| 图片实际总量超限 | 累计实际字节超过上限 | 每张读取后 | 失败关闭（声明总量预检已先行拦截） | `LimitError(resource="total_image_bytes")` |
+| 成员谎报 file_size | 中央目录声明大小与真实内容不符 | 图片读取 | 读取长度以声明为准；长度不符 → `corrupt_member` | `ArchiveError(reason="corrupt_member")` |
+| 成员谎报 file_size 且自洽 | 声明大小与 CRC 均被构造为与截断内容一致 | 图片读取 | 无法自行识别，内容被静默截断；下游必须校验 | 成功（字节已截断） |
+| 引用路径需归一 | manifest 给出 `images/./a.jpg` | 图片发现 | 输出 canonical `images/a.jpg`；下游须用 `canonicalize_member_path` 匹配 | 成功 |
 | 无关成员损坏 | 非 manifest / 非图片成员加密或损坏 | 全流程 | 不读取，不影响结果 | 成功 |
 | 非 UTF-8 成员名 | 归档未设置 UTF-8 标志 | 发现阶段 | Python 按 cp437 解码；不重新猜测 | 使用解码后的名称 |
 | 反斜杠路径 | `images\a.jpg` | 发现阶段 | canonical 拒绝反斜杠；该名称不属于 `images/` | 被忽略 |
@@ -1290,47 +1045,60 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 未知异常 | 非 `ResultExtractionError` | 所有路径 | 原样抛出，记录 `unexpected` | 原异常 |
 | `MemoryError` | 解压/校验内存不足 | 所有路径 | 不包装、不吞掉 | `MemoryError` |
 | 重复 JSON 键 | 同一对象重复 key | 解析阶段 | 解析器后值覆盖前值 | 不检测 |
-| 超长路径名 | 成员名接近 ZIP 上限 | 日志/错误 | 上下文截断到 512 字符；输出 path 不截断 | 成功/异常 |
+| 超长路径名 | 成员名接近 ZIP 上限 | 日志/错误 | 日志上下文截断到 512 字符；**结构化字段与输出 path 不截断** | 成功/异常 |
 
 ---
 
 ## 5. 任务拆解与实施步骤 (Task Breakdown)
 
+* [ ] **Phase 0: 库级公共根异常（跨 Spec）**
+* [ ] 新增 `mineru_parser/errors.py`，定义 `MinerUParserError(Exception)`，由 `mineru_parser` 顶层导出
+* [ ] `MinerUError` 与 `ResultDownloadError` 改为同时继承 `MinerUParserError`（纯加性；既有 `except` 行为不变）
+* [ ] 回归既有客户端 / 下载器测试，确认异常层次变更未改变任何捕获语义
+* [x] 回写 SPEC-001 / SPEC-002 的异常体系描述与 changelog（**已完成**：SPEC-001 §3.5 + AC-6.7；SPEC-002 §3.1 / §3.2 / §3.3 + AC-8.10 + Q-0 / Q-10）
+
 * [ ] **Phase 1: 公共契约与数据模型**
-* [ ] 新增 `extractor/errors.py`，实现 `ResultExtractionError` 体系与字段
+* [ ] 新增 `extractor/errors.py`，实现 `ResultExtractionError` 体系与字段（含 `category`、`top_level_members`）
 * [ ] 新增 `extractor/limits.py`，实现 `ExtractionLimits` 校验与 `DEFAULT_EXTRACTION_LIMITS`
 * [ ] 新增 `extractor/models.py`，定义 `ExtractedResult` / `ExtractedImage` / `ExtractionIssue`
-* [ ] 新增 `extractor/__init__.py`，在 `mineru_parser/__init__.py` 导出公共 API
+* [ ] 新增 `extractor/__init__.py`，在 `mineru_parser/__init__.py` 导出公共 API（含 `canonicalize_member_path`）
 * [ ] 实现 stream / limits / hooks 校验与游标记录
 
 * [ ] **Phase 2: ZIP 与 Manifest 发现**
 * [ ] 以只读模式打开 `ZipFile`，映射 `BadZipFile` / `LargeZipFile` / `OSError`
-* [ ] 实现 `max_members` 总量检查，避免对超大中央目录继续做发现与图片遍历
-* [ ] 实现 `canonical_member_path`、控制字符/反斜杠拒绝、常规文件/符号链接判定
-* [ ] 实现 manifest 唯一发现（仅顶层范围）、`not_found` / `ambiguous` / `unsafe_member`
-* [ ] 实现 `archive.open(info)` 有界读取与加密 / 压缩 / 损坏 / I/O 错误映射
+* [ ] 实现 EOCD 前置预检：在构造 `ZipFile` 之前拒绝超限归档，并保留中央目录解析后的后置兜底检查
+* [ ] 实现 `canonicalize_member_path`（**公开 API**，与内部共用同一实现）、控制字符/反斜杠拒绝、常规文件/符号链接判定
+* [ ] 实现 manifest 唯一发现（仅顶层范围）、`not_found`（携带顶层成员清单）/ `ambiguous` / `unsafe_member`
+* [ ] 实现 `archive.open(info)` 有界读取与加密 / 压缩 / 损坏 / I/O 错误映射；读取后校验 `len(data) == info.file_size`
 
 * [ ] **Phase 3: JSON 与 Schema 校验**
 * [ ] 实现 UTF-8 + 可选 BOM 解码
-* [ ] 接入模块级 `TypeAdapter(DocumentContentSchema)`，分类 `json_invalid` 与 `RecursionError`
-* [ ] 清洗 Pydantic 错误（`loc` / `type` / `msg`，最多 20 条，`from None`）
+* [ ] 接入模块级 `TypeAdapter(DocumentContentSchema)`，分类 `json_invalid`（含解析器递归上限）；不设 `too_deep`
+* [ ] 清洗 Pydantic 错误（`loc` / `type` / `msg`，最多 20 条，`from None`），并对 `msg` 做二次脱敏（内嵌输入值的类型替换为固定文案）
+* [ ] 实现 `category` 归一（按 §3.6 的判定顺序：判别标签 → `bbox` → 根级 → 缺字段 → 其他）
 * [ ] 确认返回的是 Pydantic 模型实例，且不调用 `model_dump()`
 
 * [ ] **Phase 4: 图片提取**
 * [ ] 解析顶层 `images/` 根目录；排除目录项与符号链接
 * [ ] 实现 canonical path 去重、字典序排序
-* [ ] 实现数量、声明总字节、单图、实际总字节四类限额
-* [ ] 实现图片有界读取与错误映射
+* [ ] 实现数量、声明总字节、单图四类限额（声明大小为有效闸门，实际字节检查作为冗余断言）
+* [ ] 实现图片有界读取与错误映射；读取后校验读取长度与声明一致
 
 * [ ] **Phase 5: 生命周期、遥测与测试**
 * [ ] 实现“不关闭流 + 恢复游标 + `restore_failed` 日志”
-* [ ] 接入 `Telemetry`：成功/失败日志、五个指标、`outcome` 映射、`correlation_id`
+* [ ] 接入 `Telemetry`：成功/失败日志、五个指标、`outcome` 映射、`correlation_id`；指标标签加入 `reason` / `resource` / `category`
 * [ ] 基于 AC 映射编写内存 ZIP 测试；覆盖损坏/加密/不支持压缩/限额/路径安全
-* [ ] 增加 `tracemalloc` 峰值内存测试
+* [ ] 增加 `tracemalloc` 峰值内存测试，并据实标定 $k_{\text{model}}$
+* [ ] 引入 Hypothesis 性质测试（AC-7.6）与正文泄漏哨兵测试（AC-7.7）
 * [ ] 用真实样本做布局与 Schema 契约测试（必要时脱敏/最小化），核对 manifest 根结构、`images/` 布局与限额基线
-* [ ] 更新 README：新增 `extract_result` 用法与数据管道图
-* [ ] 回写 SPEC-002 的 Non-Goals / Q-0，引用 SPEC-003 作为解压与内容解析的下游
+* [ ] 更新 README：新增 `extract_result` 用法、引用归一示例、数据管道图与**单次调用峰值内存上限**
+* [x] 回写 SPEC-002 的 Non-Goals / Q-0，引用 SPEC-003 作为解压与内容解析的下游（**已完成**）
 * [ ] 全量测试通过并更新 Spec 状态
+
+* [ ] **Phase 6: Spec 形态收敛（`docs/specs/CLAUDE.md` §1.6）**
+* [ ] 把 §3.4 提取算法、§3.5 成员发现与路径规则、§3.6 Manifest 校验中的实现伪码改写为**契约条款**：控制流步骤顺序、canonical path 规则、EOCD 预扫描的自洽性校验条件、大小判据与完整性校验、`msg` 脱敏与 `category` 归一规则
+* [ ] 保留 §3.3 的接口签名与集成示例、§3.1 的时序图（属契约与示例）
+* [ ] 确认 §3 不再出现具体实现代码；改写后逐条复核 AC-1.1 ~ AC-7.7 仍可从 §3 的条款直接判定，不依赖实现代码反推
 
 #### AC 与测试映射
 
@@ -1338,13 +1106,13 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 
 | 验收标准 | 计划测试 |
 | :--- | :--- |
-| AC-1.1 ~ AC-1.10 | `test_extract_basic_contract`、`test_stream_position_restored`、`test_stream_not_closed`、`test_non_seekable_stream_rejected`、`test_invalid_limits_rejected`、`test_public_exports` |
-| AC-2.1 ~ AC-2.8 | `test_manifest_discovery_root`、`test_manifest_nested_not_found`、`test_manifest_not_found`、`test_manifest_ambiguous`、`test_manifest_suffix_case_sensitive`、`test_duplicate_manifest_member`、`test_unsafe_manifest_member` |
-| AC-3.1 ~ AC-3.10 | `test_manifest_too_large_declared`、`test_manifest_too_large_actual`、`test_manifest_invalid_utf8`、`test_manifest_invalid_json`、`test_manifest_too_deep`、`test_validation_issues_sanitized`、`test_empty_document`、`test_extra_fields_ignored` |
-| AC-4.1 ~ AC-4.14 | `test_images_at_archive_root`、`test_nested_images_ignored`、`test_images_sorted`、`test_image_bytes_exact`、`test_zero_byte_image`、`test_duplicate_image_path`、`test_unsafe_image_path`、`test_symlink_image_rejected`、`test_encrypted_image`、`test_unsupported_compression_image`、`test_corrupt_image`、`test_image_limits`、`test_missing_image_root`、`test_no_cross_validation` |
-| AC-5.1 ~ AC-5.9 | `test_invalid_zip`、`test_empty_stream`、`test_member_count_limit`、`test_unrelated_member_ignored`、`test_no_disk_extraction`、`test_limits_defaults_and_validation`、`test_memory_bound_with_tracemalloc`、`test_no_retry` |
-| AC-6.1 ~ AC-6.9 | `test_error_hierarchy`、`test_validation_error_has_no_content`、`test_outcome_mapping`、`test_metrics_emitted_once`、`test_metric_hook_failure_swallowed`、`test_correlation_id_in_logs`、`test_unexpected_exception_propagates` |
-| AC-7.1 ~ AC-7.5 | `test_in_memory_only`、`test_deterministic_output`、`test_schema_adapter_reused` |
+| AC-1.1 ~ AC-1.11 | `test_extract_basic_contract`、`test_stream_position_restored`、`test_stream_not_closed`、`test_non_seekable_stream_rejected`、`test_invalid_limits_rejected`、`test_public_exports`、`test_canonicalize_member_path_matches_internal` |
+| AC-2.1 ~ AC-2.8 | `test_manifest_discovery_root`、`test_manifest_nested_not_found`、`test_manifest_not_found`、`test_manifest_not_found_carries_top_level_members`、`test_manifest_ambiguous`、`test_manifest_suffix_case_sensitive`、`test_duplicate_manifest_member`、`test_unsafe_manifest_member` |
+| AC-3.1 ~ AC-3.10 | `test_manifest_too_large_declared`、`test_manifest_length_mismatch_is_corrupt`、`test_manifest_invalid_utf8`、`test_manifest_invalid_json`、`test_manifest_deep_nesting_is_invalid_json`、`test_validation_issues_sanitized`、`test_validation_category`、`test_empty_document`、`test_extra_fields_ignored` |
+| AC-4.1 ~ AC-4.14 | `test_images_at_archive_root`、`test_nested_images_ignored`、`test_images_sorted`、`test_image_bytes_exact`、`test_image_length_mismatch_is_corrupt`、`test_zero_byte_image`、`test_duplicate_image_path`、`test_unsafe_image_path`、`test_symlink_image_rejected`、`test_encrypted_image`、`test_unsupported_compression_image`、`test_corrupt_image`、`test_image_limits`、`test_missing_image_root`、`test_no_cross_validation`、`test_reference_canonicalization_roundtrip` |
+| AC-5.1 ~ AC-5.10 | `test_invalid_zip`、`test_empty_stream`、`test_member_count_limit`、`test_member_count_precheck_before_zipfile`、`test_eocd_precheck_skips_on_zip64`、`test_unrelated_member_ignored`、`test_no_disk_extraction`、`test_limits_defaults_and_validation`、`test_memory_bound_with_tracemalloc`、`test_no_retry` |
+| AC-6.1 ~ AC-6.9 | `test_error_hierarchy`、`test_common_root_exception`、`test_validation_error_has_no_content`、`test_structured_paths_not_truncated`、`test_outcome_mapping`、`test_metrics_emitted_once`、`test_metric_tags_include_reason`、`test_metric_hook_failure_swallowed`、`test_correlation_id_in_logs`、`test_unexpected_exception_propagates` |
+| AC-7.1 ~ AC-7.7 | `test_in_memory_only`、`test_deterministic_output`、`test_schema_adapter_reused`、`test_property_invariants`（Hypothesis）、`test_no_content_leak_sentinel`（Hypothesis） |
 
 ---
 
@@ -1355,27 +1123,31 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 编号 | 风险 / 问题描述 | 潜在影响 | 缓解 / 规避方案 | 状态 / 负责人 |
 | :--- | :--- | :--- | :--- | :--- |
 | `[R-1]` | 默认限额未用真实结果包校准 | 大文档被误拒，或默认上限仍过高 | 已核对 1 个最小样本（manifest 4.8 KB、单图 13.9 KB，远低于默认值）；仍需用更多样本统计 manifest / 单图 / 总图片字节的 P50/P95/P99，并通过 `ExtractionLimits` 按场景覆盖 | 待评估 / @jackafx |
-| `[R-2]` | 压缩炸弹、解压 CPU 放大与超大中央目录 | 虽然有解压后限额，但 zlib 仍可能消耗大量 CPU；`ZipFile` 在 `max_members` 检查前已分配 `ZipInfo` | 有界读取 + 解压后字节/数量上限 + `max_members`；中央目录规模受调用方提供的 ZIP 字节数上限约束；保持 Python/zlib 更新；必要时在调用方做超时/隔离 | 待评估 / @jackafx |
+| `[R-2]` | 压缩炸弹、解压 CPU 放大与超大中央目录 | 虽然有解压后限额，但 zlib 仍可能消耗大量 CPU | 有界读取 + 解压后字节/数量上限 + `max_members`；**成员数量前置预检**（EOCD）在构造 `ZipFile` 之前拒绝，避免中央目录内存先分配；中央目录规模仍受调用方提供的 ZIP 字节数上限约束；保持 Python/zlib 更新；必要时在调用方做超时/隔离 | 待评估 / @jackafx |
 | `[R-3]` | Pydantic 模型内存远大于 JSON 字节 | 峰值内存超过凭 manifest 大小估算的值 | 使用 `tracemalloc` 测试真实样例；文档说明模型放大；必要时调低 `max_manifest_bytes` | 待评估 / @jackafx |
 | `[R-4]` | `content_v2` Schema 漂移 | 上游新增 block type / 字段导致校验失败或额外字段被忽略 | 用真实结果包做契约测试；未知 `type` 失败关闭；版本升级时同步 Schema | 待评估 / @jackafx |
-| `[R-5]` | 结果包目录布局漂移 | manifest 落到子目录时报 `not_found`；`images/` 落到子目录时返回 `images=[]` | 布局漂移表现为显式失败或空图片集，不会静默读到错误内容；用真实样例确认顶层布局；监控 `outcome=manifest_error` 与 `outcome=success` 但 `images=0` 的比例 | 待评估 / @jackafx |
+| `[R-5]` | 结果包目录布局漂移 | manifest 落到子目录时报 `not_found`；`images/` 落到子目录时返回 `images=[]` | 布局漂移表现为显式失败或空图片集，不会静默读到错误内容；`not_found` **携带顶层成员清单与总数**，可直接分诊漂移形态；用真实样例确认顶层布局；监控 `outcome=manifest_error` 与 `outcome=success` 但 `images=0` 的比例 | 待评估 / @jackafx |
 | `[R-6]` | ZIP 成员名编码差异 | 未设置 UTF-8 标志时 Python 按 cp437 解码，路径出现 mojibake | 文档说明使用服务端原始 ZIP；调用方可用 bytes 层重新编码；不在 Extractor 内猜测 | 已缓解 / @jackafx |
 | `[R-7]` | 返回的 path 被下游直接拼磁盘路径 | 目录穿越或覆盖文件 | Extractor 拒绝 `..` / 绝对路径；下游仍必须做目标目录约束 | 待评估 / @jackafx |
 | `[R-8]` | manifest 与图片引用不一致 | 页面引用的图片缺失，或存在未引用图片 | 本期不做交叉校验；下游按需检查；未来可增加 strict 模式（Q-3） | 待评估 / @jackafx |
 | `[R-9]` | 无法识别的符号链接 | 归档未写 Unix mode，symlink 被当作普通文件返回目标字符串 | 仅能识别常见 Unix mode；文档说明；下游按图片内容校验 | 待评估 / @jackafx |
 | `[R-10]` | 图片字节未解码/校验 | 下游渲染器可能遇到损坏或恶意图片 | 明确 Non-Goal；下游渲染器必须自行校验与隔离 | 已缓解 / @jackafx |
 | `[R-11]` | Pydantic lax 模式接受非严格值 | 数字字符串等被自动转换，可能掩盖上游问题 | 本期沿用 Schema 默认语义；需要严格校验时评估 Q-6 | 待评估 / @jackafx |
-| `[R-12]` | `ZipInfo.file_size` 撒谎 | 声明大小预检可能误拒，或需要实际读取才能发现超限 | 有界读取为最终判据；声明大小只用于提前失败；失败关闭 | 已缓解 / @jackafx |
+| `[R-12]` | `ZipInfo.file_size` 撒谎 | `zipfile` 把读取钳制在中央目录声明的大小之内：谎报**偏大**会误拒真实内容；谎报**偏小且 CRC 自洽**会造成图片**静默截断**，Extractor 无法自行识别 | 声明大小是唯一有效闸门（预检即失败关闭）；读取长度必须与声明一致（不一致 → `corrupt_member`）；**静默截断无法在 Extractor 内消除**，已写入输出契约——下游必须自行校验图片内容（R-10） | 部分缓解 / @jackafx |
 | `[R-13]` | `zipfile` / `zlib` 实现漏洞 | 恶意归档触发解析器漏洞 | 保持 Python 运行时更新；内存/数量限额；必要时在子进程/容器中解析 | 待评估 / @jackafx |
 | `[R-14]` | 超长成员名、控制字符或反斜杠 | 日志注入、异常消息过大、Windows 路径歧义 | canonical path 拒绝 `..` / 绝对路径 / 反斜杠 / 控制字符；不安全原始名转义并截断到 512 字符 | 已缓解 / @jackafx |
 | `[R-15]` | 重复 JSON 键 | 后值覆盖前值，可能隐藏数据 | 本期不检测；若需要防篡改，增加自定义 JSON 解析器（Q-13） | 待评估 / @jackafx |
 | `[R-16]` | `MemoryError` 不可恢复 | 极端情况下进程仍可能 OOM | 限额是主要防线；调用方应控制并发与进程内存；不吞掉 `MemoryError` | 已缓解 / @jackafx |
+| `[R-17]` | 单次调用峰值内存与并发度 | 默认限额下单次调用峰值内存达数百 MiB；$W$ 路并发会放大到 $W \times$ 该值，可能触发容器 OOM | §3.2 的端到端预算给出推导口径与默认假设（$W = 4$、1 GiB）；README 写明峰值内存上限；`ExtractionLimits` 可按部署覆盖；必要时改为懒加载图片（见 Q-20） | 待评估 / @jackafx |
+| `[R-18]` | EOCD 前置预检的误判 | 尾部窗口内的伪 EOCD 签名可能导致误拒或漏拒 | 自洽性校验（EOCD 必须位于窗口尾部、注释长度与尾部一致、单盘归档）；不自洽一律跳过预检；中央目录解析后的后置检查始终保留 | 已缓解 / @jackafx |
 
 ### 6.2 待决事项 (Open Questions)
 
 > **已闭环（划线/归档）：**
 > * [x] ~~`[Q-0]`：Extractor 是否负责下载/重试？~~
 >   * **决策结论**：不负责。下载与重试属于上游下载组件；Extractor 只解析内存 ZIP。
+> * [x] ~~`[Q-21]`：三条失败路径是否需要统一根异常？~~
+>   * **决策结论**：需要。新增库级公共根 `MinerUParserError`，`MinerUError` / `ResultDownloadError` / `ResultExtractionError` 均继承之。三者仍互不继承，既有捕获语义不变；纯加性变更，趁组件数量最少时一次性落地。
 
 #### 1. 核心架构与契约 (Architecture & Contract)
 
@@ -1415,3 +1187,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
   * **结论**：暂不纳入；每个路径一条记录。若下游存储成本成为问题，再增加可选去重层。
 * [ ] **`[Q-18]`**：是否在结果中增加页面元数据（页号、原始画像尺寸等）？
   * **结论**：暂不增加；页号可由 `pages` 下标推导，其他元数据不在 `content_v2` Schema 中。
+* [ ] **`[Q-19]`**：是否提供 strict 尺寸模式——绕开 `zipfile` 自行解压以获得真实解压长度，从而彻底消除静默截断（R-12）？
+  * **结论**：v1 不做。代价是重写 `zipfile` 的本地头解析、CRC 与加密处理（约 100–150 行 + 对应测试），收益仅覆盖敌意归档这一残余风险；该风险已通过输出契约与 R-10 明确转移给下游。待安全评审提出明确需求后再评估。
+* [ ] **`[Q-20]`**：图片是否改为懒加载（生成器）以降低峰值内存？
+  * **结论**：暂不纳入。v1 的内存上限由 `max_total_image_bytes` 给出并已在 §3.2 推导；若 R-17 显示目标部署形态不允许，可再评估生成器形态——它会改变返回契约（"失败不返回部分结果"与"整份一次性载入"两条前提都要重写），需要独立评估。
