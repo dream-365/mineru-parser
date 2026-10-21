@@ -1,7 +1,7 @@
 """轮询策略与循环。
 
 这一层只回答“什么时候再查、什么时候放弃”，不解释任务的成败；
-终态语义由 :class:`~mineru_parser.client.async_result.AsyncResult` 处理。
+终态语义由 :class:`~mineru_parser._client.async_result.AsyncResult` 处理。
 """
 
 from __future__ import annotations
@@ -276,7 +276,8 @@ class Poller:
             return
         try:
             on_update(status)
-        except Exception as exc:  # noqa: BLE001 - 回调失败不中断轮询
+        except BaseException as exc:  # noqa: BLE001 - 回调失败不中断轮询
+            # SPEC-001 AC-7.2：on_update 抛出的任何异常都必须被吞掉。
             self._telemetry.log(
                 "mineru.on_update.failed",
                 level=logging.WARNING,

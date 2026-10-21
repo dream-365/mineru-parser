@@ -1,5 +1,14 @@
 # Changelog: SPEC-002 ResultDownloader
 
+## [2026-10-21] - 随 SPEC-004 同步导出路径：组件转为私有实现
+
+- **修改类型**: Changed
+- **影响范围**: §3.3 公共 API 稳定性说明、§5 任务拆解中的导出条目
+- **变更原因**: SPEC-004 将 client / downloader / extractor 三个组件包私有化（`mineru_parser._downloader`），公开路径 `mineru_parser.downloader` 与顶层 `mineru_parser.__all__` 不再提供组件 API（SPEC-004 AC-2.3）。本 Spec 中"必须从顶层导出"的表述若不同步，将形成无法满足的断言。
+- **具体内容**: 把"通过 `mineru_parser.downloader.__all__` 与顶层 `mineru_parser.__all__` 导出"改为"通过私有实现包 `mineru_parser._downloader.__all__` 导出，不再由顶层导出"；任务拆解中的导出路径同步改名。下载器的行为契约、异常层次、限额与判定规则均未改动。
+- **说明**: 纯文档对齐，无契约语义变化。
+- **状态**: In Review。
+
 ## [2026-10-21] - 引入库级公共根异常 `MinerUParserError`，并指向 SPEC-003
 
 - **修改类型**: Changed / Added

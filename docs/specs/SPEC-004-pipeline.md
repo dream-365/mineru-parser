@@ -882,31 +882,31 @@ $$
 
 ### Phase 1: 契约与骨架
 
-- [ ] 定义 `PipelineStage` 枚举、`PipelineError` / `PipelineConfigurationError` / `PipelineTimeoutError` 异常体系（`mineru_parser/pipeline/errors.py`、`stages.py`）
-- [ ] 定义 `ParseResult`（六键信封：`status` / `data` / `task_id` / `data_id` / `zip_url` / `error`，`data` 为独立的 `ExtractedResult`，**不继承**）与 `ErrorMessage`（四字段）类型，并从顶层导出
-- [ ] 建立 `mineru_parser/pipeline` 包与 `orchestrator.py` 骨架（阶段状态机 + 生命周期骨架）
-- [ ] 实现端到端预算模块（`budget.py`）：`timeout` / `deadline_epoch` 换算、剩余预算计算、检查点
-- [ ] 顶层 `__init__.py` 收缩为"一个函数 + 必要类型"（AC-2.1 / AC-2.2 / AC-2.3），同步删除被移除的顶层导出
+- [x] 定义 `PipelineStage` 枚举、`PipelineError` / `PipelineConfigurationError` / `PipelineTimeoutError` 异常体系（`mineru_parser/pipeline/errors.py`、`stages.py`）
+- [x] 定义 `ParseResult`（六键信封：`status` / `data` / `task_id` / `data_id` / `zip_url` / `error`，`data` 为独立的 `ExtractedResult`，**不继承**）与 `ErrorMessage`（四字段）类型，并从顶层导出
+- [x] 建立 `mineru_parser/pipeline` 包与 `orchestrator.py` 骨架（阶段状态机 + 生命周期骨架）
+- [x] 实现端到端预算模块（`budget.py`）：`timeout` / `deadline_epoch` 换算、剩余预算计算、检查点
+- [x] 顶层 `__init__.py` 收缩为"一个函数 + 必要类型"（AC-2.1 / AC-2.2 / AC-2.3），同步删除被移除的顶层导出
 
 ### Phase 2: 编排实现
 
-- [ ] 实现四阶段编排与阶段归因（`on_error`、阶段日志、阶段耗时）
-- [ ] 实现**信封模式**（默认）：已知异常 → `ErrorMessage` + `status="failed"`；兜不住的异常原样抛出
-- [ ] 实现**异常模式**（`raise_on_error=True`）：已知异常原样抛出（超时翻译为 `PipelineTimeoutError`，保留 `__cause__`）
-- [ ] 实现 `ErrorMessage` 的构造与脱敏（只含 `stage` / `error_type` / `message` / `cause_type`）
-- [ ] 实现失败信封的"当时已知"元数据回填（`task_id` / `data_id` / `zip_url`）
-- [ ] 实现所有权与关闭顺序（ZIP 流 → downloader → client），管道自建实例一律由管道关闭
-- [ ] 实现管道遥测（§3.4 遥测表）与 `correlation_id` 透传
+- [x] 实现四阶段编排与阶段归因（`on_error`、阶段日志、阶段耗时）
+- [x] 实现**信封模式**（默认）：已知异常 → `ErrorMessage` + `status="failed"`；兜不住的异常原样抛出
+- [x] 实现**异常模式**（`raise_on_error=True`）：已知异常原样抛出（超时翻译为 `PipelineTimeoutError`，保留 `__cause__`）
+- [x] 实现 `ErrorMessage` 的构造与脱敏（只含 `stage` / `error_type` / `message` / `cause_type`）
+- [x] 实现失败信封的"当时已知"元数据回填（`task_id` / `data_id` / `zip_url`）
+- [x] 实现所有权与关闭顺序（ZIP 流 → downloader → client），管道自建实例一律由管道关闭
+- [x] 实现管道遥测（§3.4 遥测表）与 `correlation_id` 透传
 
 ### Phase 3: 测试与验收
 
-- [ ] 覆盖 AC-7.2 的全部路径：四阶段成功、四阶段失败、预算耗尽、回调隔离、生命周期关闭
-- [ ] **双模式**测试：同一失败在信封模式与异常模式下的信息量必须一致（AC-1.11 / AC-1.12）
-- [ ] 异常同一性测试（AC-7.3，异常模式）：断言抛出对象 `is` 阶段抛出对象
-- [ ] 兜不住异常的传播测试（AC-5.14）：未知异常 / `MemoryError` 在两种模式下都必须原样抛出
-- [ ] 顶层 API 面测试（AC-7.4）：唯一**函数**断言（按"函数"而非"可调用对象"判定，AC-2.1）+ 保留 / 移除名单断言
-- [ ] 默认构造路径测试（AC-7.5）：本地 mock HTTP 服务 + 内部测试缝替换 downloader
-- [ ] 全量回归：`tests/test_client.py` / `test_downloader.py` / `test_extractor.py` / `test_extractor_property.py` 必须全部通过
+- [x] 覆盖 AC-7.2 的全部路径：四阶段成功、四阶段失败、预算耗尽、回调隔离、生命周期关闭
+- [x] **双模式**测试：同一失败在信封模式与异常模式下的信息量必须一致（AC-1.11 / AC-1.12）
+- [x] 异常同一性测试（AC-7.3，异常模式）：断言抛出对象 `is` 阶段抛出对象
+- [x] 兜不住异常的传播测试（AC-5.14）：未知异常 / `MemoryError` 在两种模式下都必须原样抛出
+- [x] 顶层 API 面测试（AC-7.4）：唯一**函数**断言（按"函数"而非"可调用对象"判定，AC-2.1）+ 保留 / 移除名单断言
+- [x] 默认构造路径测试（AC-7.5）：本地 mock HTTP 服务 + 内部测试缝替换 downloader
+- [x] 全量回归：`tests/test_client.py` / `test_downloader.py` / `test_extractor.py` / `test_extractor_property.py` 必须全部通过
 
 ### Phase 4: 文档与迁移
 
@@ -915,9 +915,9 @@ $$
 - [x] README 补写：`ParseResult` 的六个键与元数据来源；`ErrorMessage` 的四个字段；`zip_url` 作为敏感值的处理提示（随 `df05cff` 落盘）
 - [x] README 补写失败语义：**默认信封、不抛异常**，`raise_on_error=True` 才抛；已知异常封装、兜不住的抛出（随 `df05cff` 落盘）
 - [x] README 补写风险提示：`data_id` 非幂等键、默认无端到端超时、崩溃后任务不可恢复（无状态设计的已知代价）（随 `df05cff` 落盘）
-- [ ] README 顶部补"目标公共面尚未实现"的状态说明——**已随 `df05cff` 落盘**，实现落地后须删除该说明
-- [ ] 本 Spec 的 changelog 记录破坏性变更（已随初稿创建）；`docs/specs/CLAUDE.md` 若后续新增"组件清单"章节，须把 SPEC-004 补入
-- [ ] 各组件 SPEC（001 / 002 / 003）的"由顶层导出"表述同步回写为"内部实现"
+- [x] README 顶部补"目标公共面尚未实现"的状态说明——**已随 `df05cff` 落盘**，实现落地后须删除该说明
+- [x] 本 Spec 的 changelog 记录破坏性变更（已随初稿创建）；`docs/specs/CLAUDE.md` 若后续新增"组件清单"章节，须把 SPEC-004 补入
+- [x] 各组件 SPEC（001 / 002 / 003）的"由顶层导出"表述同步回写为"内部实现"
 
 ### AC ↔ 测试映射（计划）
 

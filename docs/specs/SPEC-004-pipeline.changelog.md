@@ -1,5 +1,31 @@
 # Changelog: SPEC-004 Pipeline
 
+## [2026-10-21] - 实现落地：`parse` 门面、组件私有化与四阶段编排
+
+- **修改类型**: Added / Changed
+- **影响范围**: 顶层 API 面（`mineru_parser.__init__`）、新增 `mineru_parser.pipeline` 包、组件包路径（`_client` / `_downloader` / `_extractor`）、§5 Phase 1 ~ 4
+- **变更原因**: 按本 Spec 的 AC 实现唯一公共入口 `parse`，并完成组件私有化这一有意的破坏性变更（项目版本 0.1.0）。
+- **具体内容**:
+  - **实现落盘**：新增 `mineru_parser/pipeline/`（`stages.py` / `errors.py` / `result.py` / `budget.py` / `orchestrator.py`）。四阶段编排、端到端预算与检查点、信封 / 异常双模式、阶段归因、生命周期与所有权、遥测与 `correlation_id` 透传均按 §3 契约实现。
+  - **组件私有化**：`client` / `downloader` / `extractor` 三个包改名为 `_client` / `_downloader` / `_extractor`。公开路径 `mineru_parser.client` / `.downloader` / `.extractor` **不再提供**；组件行为契约（SPEC-001 / 002 / 003）不变，既有组件测试改为从私有路径导入。
+  - **顶层 API 面**：`mineru_parser.__all__` 收缩为 14 个条目——唯一函数 `parse` + AC-2.2 要求的类型、异常类与 `__version__`。
+  - **回调与清理边界**：`on_error` / `on_metric` / `on_update` 的异常隔离覆盖 `BaseException`（契约要求"任何异常"必须被吞掉）；`close()` 在清理阶段失败时只记录 `mineru.pipeline.close.failed` 告警，不改变本次调用的结果、不阻止后续资源关闭。
+  - **测试**：新增 `tests/test_pipeline.py`（66 个测试函数 / 75 个用例，含参数化），覆盖 AC-7.2 的全部路径、异常同一性、双模式等价性、预算检查点、关闭顺序、并发隔离、回调隔离（含 `BaseException`）、指标与日志口径、顶层 API 面、默认构造路径（本地回环 mock HTTP 服务）与无网络约束。全量回归 428 个测试通过。
+  - **迁移对照（AC-2.4）**：
+
+    | 旧顶层导入 | 新公共面 |
+    | :--- | :--- |
+    | `from mineru_parser import MinerUApiClient, AsyncResult` | **无法再导入**；改用 `from mineru_parser import parse` |
+    | `from mineru_parser import ResultDownloader` | **无法再导入**；改用 `parse` |
+    | `from mineru_parser import extract_result, canonicalize_member_path` | **无法再导入**；改用 `parse` 的 `data` 字段 |
+    | `from mineru_parser import MinerUQuotaError` 等三族具体异常类 | **无法再导入**；改用 `MinerUParserError` + `type(exc).__name__`，或信封的 `error["error_type"]` |
+    | `from mineru_parser import MinerUParserError` | 保留，无需改动 |
+    | `from mineru_parser import ExtractedResult, ExtractedImage, ExtractionLimits, MetricHook, MinerUTaskStatus` | 保留，无需改动 |
+    | — | 新增：`parse`、`ParseResult`、`ErrorMessage`、`PipelineStage`、`PipelineError`、`PipelineTimeoutError`、`PipelineConfigurationError` |
+
+- **说明**: 本轮未改变任何 AC 语义；实现与 §3 契约一致。README 顶部的"目标公共面尚未实现"状态说明已删除。组件 SPEC 的导出表述已同步为私有实现（见各自 changelog）。
+- **状态**: In Review（实现完成，待 PR 合并与验收后推进为 Implemented）。
+
 ## [2026-10-21] - 契约自洽修订：唯一函数判定、管道异常顶层导出、失效表述订正
 
 - **修改类型**: Fixed / Changed

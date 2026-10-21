@@ -156,7 +156,7 @@ flowchart LR
 - **AC-1.5**: 不得修改输入流内容；成功与所有已处理失败路径都必须把游标恢复到调用前位置。恢复失败时必须记录 `mineru.extract.restore_failed` 警告日志，但不得覆盖主要成功/失败结果。
 - **AC-1.6**: 输入必须是可读、可 seek 的二进制流。`io.TextIOBase`、缺少 `read`/`seek`/`tell`、`seekable()` / `readable()` 为假，或解析前 `tell()` 失败，必须在读取 ZIP 前抛出 `ResultExtractionConfigurationError(field="stream")`。
 - **AC-1.7**: `limits` 必须是 `ExtractionLimits | None`；`on_metric` 必须是 callable 或 `None`；`correlation_id` 必须是 `str | None`。非法值必须在读取 ZIP 前抛出 `ResultExtractionConfigurationError`。
-- **AC-1.8**: `extract_result`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、`ExtractionIssue`、`canonicalize_member_path` 与全部 `ResultExtraction*Error` 必须可从 `mineru_parser.extractor` 与顶层 `mineru_parser` 导入。
+- **AC-1.8**: `extract_result`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、`ExtractionIssue`、`canonicalize_member_path` 与全部 `ResultExtraction*Error` 必须可从私有实现包 `mineru_parser._extractor` 导入。顶层 `mineru_parser` 只保留 `ExtractedResult` / `ExtractedImage` / `ExtractionLimits`（`parse` 的签名 / 返回值所需类型）；其余名称不再由顶层导出（SPEC-004 AC-2.2 / AC-2.3）。
 - **AC-1.9**: 函数不得持有可变模块级调用状态；不同流上的并发调用必须安全。同一个流上的并发调用不受支持，实现无需加锁。
 - **AC-1.10**: 不得调用 `stream.close()`、`ZipFile.extract()` 或 `ZipFile.extractall()`。
 - **AC-1.11**: `canonicalize_member_path(raw: str) -> str | None` 必须对任意字符串返回与 Extractor 内部**完全一致**的 canonical path，无法安全 canonical 化时返回 `None`。实现必须与 `_members` 共用同一份函数，不得复制第二套规则；该函数不得访问 ZIP、不得读取任何成员。
@@ -586,7 +586,7 @@ def canonicalize_member_path(raw: str) -> str | None: ...
 | **内部**      | 成员发现、EOCD 预扫描、错误清洗辅助函数、常量                                                                                                          | 不承诺稳定性                |
 
 
-所有公共名称必须通过 `mineru_parser.extractor.__all__` 与顶层 `mineru_parser.__all__` 导出。
+所有实现名称必须通过 `mineru_parser._extractor.__all__` 导出；组件已随 SPEC-004 私有化，**不再由顶层 `mineru_parser.__all__` 导出**（SPEC-004 AC-2.3），`mineru_parser.extractor` 公开路径不再提供。顶层只保留 `parse` 的签名 / 返回值所需类型（`ExtractedResult` / `ExtractedImage` / `ExtractionLimits`，SPEC-004 AC-2.2）。
 
 #### 输入契约 (Input Contract)
 

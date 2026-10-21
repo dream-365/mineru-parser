@@ -13,12 +13,11 @@ import zipfile
 import pytest
 
 import mineru_parser
-from mineru_parser import (
+from mineru_parser import ExtractionLimits, MinerUParserError
+from mineru_parser._client import MinerUError
+from mineru_parser._downloader import ResultDownloadError
+from mineru_parser._extractor import (
     DEFAULT_EXTRACTION_LIMITS,
-    ExtractionLimits,
-    MinerUError,
-    MinerUParserError,
-    ResultDownloadError,
     ResultExtractionArchiveError,
     ResultExtractionConfigurationError,
     ResultExtractionError,
@@ -28,8 +27,8 @@ from mineru_parser import (
     canonicalize_member_path,
     extract_result,
 )
-from mineru_parser.extractor import _manifest, _members
-from mineru_parser.extractor.extractor import (
+from mineru_parser._extractor import _manifest, _members
+from mineru_parser._extractor.extractor import (
     _error_log_fields,
     _metric_tags,
     _outcome_for,
@@ -179,7 +178,8 @@ class Metrics:
 # --- 公共契约与异常层次 ---------------------------------------------------
 
 
-def test_public_exports():
+def test_private_package_exports():
+    """SPEC-004：组件 API 只保留在私有实现包内，不再由顶层导出。"""
     expected = [
         "DEFAULT_EXTRACTION_LIMITS",
         "ExtractedImage",
@@ -194,19 +194,29 @@ def test_public_exports():
         "ResultExtractionValidationError",
         "canonicalize_member_path",
         "extract_result",
-        "MinerUParserError",
     ]
+    import mineru_parser._extractor as extractor_package
+
     for name in expected:
+        assert hasattr(extractor_package, name)
+        assert name in extractor_package.__all__
+
+    # 顶层只保留 parse 签名 / 返回值所需的类型（SPEC-004 AC-2.2）
+    for name in ("ExtractedImage", "ExtractedResult", "ExtractionLimits"):
         assert hasattr(mineru_parser, name)
         assert name in mineru_parser.__all__
 
-    import mineru_parser.extractor as extractor_package
-
-    for name in expected:
-        if name == "MinerUParserError":
-            continue
-        assert hasattr(extractor_package, name)
-        assert name in extractor_package.__all__
+    # 组件函数与具体异常类不再出现在顶层（SPEC-004 AC-2.3）
+    for name in (
+        "extract_result",
+        "canonicalize_member_path",
+        "ResultExtractionError",
+        "ResultExtractionValidationError",
+        "DEFAULT_EXTRACTION_LIMITS",
+        "ExtractionIssue",
+    ):
+        assert not hasattr(mineru_parser, name)
+        assert name not in mineru_parser.__all__
 
 
 def test_error_hierarchy_and_common_root():
@@ -831,7 +841,7 @@ def test_extra_fields_are_ignored():
 def test_schema_adapter_is_module_level():
     import importlib
 
-    reloaded = importlib.import_module("mineru_parser.extractor._manifest")
+    reloaded = importlib.import_module("mineru_parser._extractor._manifest")
     assert reloaded is _manifest
     assert _manifest._SCHEMA is reloaded._SCHEMA
 
@@ -1063,7 +1073,7 @@ def test_member_count_precheck_before_zipfile(monkeypatch):
 def test_member_count_postcheck(monkeypatch):
     archive = make_zip(*[member(f"file{i}.txt", b"x") for i in range(3)])
     monkeypatch.setattr(
-        "mineru_parser.extractor.extractor.member_count_bound",
+        "mineru_parser._extractor.extractor.member_count_bound",
         lambda stream: None,
     )
     with pytest.raises(ResultExtractionLimitError) as error:
@@ -1147,7 +1157,7 @@ def test_memory_bound_with_tracemalloc():
 
 def test_restore_failure_logged_without_overriding_result(monkeypatch, caplog):
     monkeypatch.setattr(
-        "mineru_parser.extractor.extractor._restore_stream",
+        "mineru_parser._extractor.extractor._restore_stream",
         lambda stream, position: (_ for _ in ()).throw(OSError("boom")),
     )
     with caplog.at_level(logging.WARNING, logger="mineru_parser"):
@@ -1275,7 +1285,7 @@ def test_memory_error_propagates_unwrapped(monkeypatch):
         raise MemoryError("oom")
 
     monkeypatch.setattr(
-        "mineru_parser.extractor.extractor._resolve_limits", explode
+        "mineru_parser._extractor.extractor._resolve_limits", explode
     )
     with pytest.raises(MemoryError):
         extract_result(io.BytesIO(package()))
@@ -1286,7 +1296,7 @@ def test_keyboard_interrupt_is_not_swallowed(monkeypatch):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(
-        "mineru_parser.extractor.extractor._resolve_limits", explode
+        "mineru_parser._extractor.extractor._resolve_limits", explode
     )
     metrics = Metrics()
     with pytest.raises(KeyboardInterrupt):
@@ -1301,7 +1311,7 @@ def test_unexpected_exception_propagates(monkeypatch):
         raise ValueError("unexpected")
 
     monkeypatch.setattr(
-        "mineru_parser.extractor.extractor._resolve_limits", explode
+        "mineru_parser._extractor.extractor._resolve_limits", explode
     )
     with pytest.raises(ValueError):
         extract_result(io.BytesIO(package()), on_metric=metrics)

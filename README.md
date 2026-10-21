@@ -11,8 +11,6 @@
 | ③ 下载 | downloader | `zip_url` | `io.BytesIO`（ZIP 内存流） |
 | ④ 解析 | extractor | ZIP 内存流 | `ExtractedResult`（`{pages, images}`） |
 
-> **📌 文档状态**：本页描述的是 [SPEC-004](docs/specs/SPEC-004-pipeline.md) 定义的**目标公共面**（唯一入口 `parse`）。该 Spec 目前处于 **In Review**、**尚未实现**；当前发布版（0.1.0）的顶层 API 仍是三组件（`MinerUApiClient` / `ResultDownloader` / `extract_result`），用法见 [迁移](#迁移)。实现落地后本页即为唯一入口文档，顶层三组件将**不再提供**（破坏性变更）。
-
 ## 快速开始
 
 ```python

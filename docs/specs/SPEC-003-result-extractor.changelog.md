@@ -1,5 +1,14 @@
 # Changelog: SPEC-003 Result Extractor
 
+## [2026-10-21] - 随 SPEC-004 同步导出路径：组件转为私有实现
+
+- **修改类型**: Changed
+- **影响范围**: AC-1.8、§3.3 公共名称导出说明、§5 任务拆解中的导出条目
+- **变更原因**: SPEC-004 将提取器包私有化为 `mineru_parser._extractor`，公开路径 `mineru_parser.extractor` 与顶层 `mineru_parser.__all__` 不再提供组件 API（SPEC-004 AC-2.3）。AC-1.8 原文要求"可从 `mineru_parser.extractor` 与顶层 `mineru_parser` 导入"，在 SPEC-004 落地后不可满足。
+- **具体内容**: AC-1.8 改为"必须可从私有实现包 `mineru_parser._extractor` 导入"；顶层只保留 `parse` 签名 / 返回值所需的 `ExtractedResult` / `ExtractedImage` / `ExtractionLimits`（SPEC-004 AC-2.2）。导出说明与任务拆解路径同步改名。提取器的行为契约、异常体系、限额与判定规则均未改动。
+- **说明**: 纯文档对齐，无契约语义变化。
+- **状态**: Approved。
+
 ## [2026-10-21] - 实现完成：任务拆解勾选、AC↔测试映射回填、状态推进为 Approved
 
 - **修改类型**: Changed

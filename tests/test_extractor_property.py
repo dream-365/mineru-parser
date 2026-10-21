@@ -9,8 +9,8 @@ import zipfile
 from hypothesis import given, settings, strategies as st
 from pydantic import BaseModel
 
-from mineru_parser import (
-    ExtractionLimits,
+from mineru_parser import ExtractionLimits
+from mineru_parser._extractor import (
     ResultExtractionError,
     ResultExtractionValidationError,
     canonicalize_member_path,

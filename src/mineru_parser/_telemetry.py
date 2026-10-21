@@ -24,11 +24,18 @@ class Telemetry:
         self._on_metric = on_metric
         self._correlation_id = correlation_id
 
-    def log(self, event: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    def log(
+        self,
+        event: str,
+        *,
+        level: int = logging.INFO,
+        exc_info: bool | BaseException = False,
+        **fields: Any,
+    ) -> None:
         extra = {key: value for key, value in fields.items() if value is not None}
         if self._correlation_id is not None:
             extra["correlation_id"] = self._correlation_id
-        _logger.log(level, event, extra=extra)
+        _logger.log(level, event, exc_info=exc_info, extra=extra)
 
     def metric(
         self,
@@ -40,7 +47,10 @@ class Telemetry:
             return
         try:
             self._on_metric(name, float(value), dict(tags or {}))
-        except Exception as exc:  # noqa: BLE001 - 指标失败不影响主流程
+        except BaseException as exc:  # noqa: BLE001 - 指标失败不影响主流程
+            # 契约要求吞掉回调抛出的**任何**异常（SPEC-001 AC-10.2 /
+            # SPEC-002 AC-9.3 / SPEC-003 AC-6.7 / SPEC-004 AC-5.6），
+            # 且不得让回调异常打断后续指标上报。
             self.log(
                 "mineru.metric.failed",
                 level=logging.WARNING,
