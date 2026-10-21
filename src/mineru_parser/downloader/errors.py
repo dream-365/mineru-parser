@@ -6,9 +6,15 @@
 
 from __future__ import annotations
 
+from ..errors import MinerUParserError
 
-class ResultDownloadError(Exception):
-    """下载器异常基类。"""
+
+class ResultDownloadError(MinerUParserError):
+    """下载器异常基类。
+
+    继承库级根 ``MinerUParserError``，与客户端 / 提取器两条失败路径
+    **互不继承**；既有 ``except ResultDownloadError`` 的捕获语义不变。
+    """
 
 
 class ResultDownloadConfigurationError(ResultDownloadError):

@@ -10,8 +10,9 @@
 - **等待边界**：支持相对超时和绝对截止时间，超时异常携带最后已知的任务状态；
 - **进度回调**：状态或解析页数变化时触发回调，便于上报进度；
 - **错误分类**：认证、额度、瞬时、执行与超时错误分别抛出，便于调用方决定重试策略；
-- **结果交付**：成功时返回 MinerU 结果包的 `zip_url`，下载与解压由调用方处理；
-- **可选下载器**：`ResultDownloader` 把结果包 URL 流式读入 `io.BytesIO`，统一处理超时、重试、SSRF 防护与内存上限；不使用时 API 客户端行为不变。
+- **结果交付**：成功时返回 MinerU 结果包的 `zip_url`，下载与解压由调用方组合 `ResultDownloader` / `extract_result` 处理；
+- **可选下载器**：`ResultDownloader` 把结果包 URL 流式读入 `io.BytesIO`，统一处理超时、重试、SSRF 防护与内存上限；不使用时 API 客户端行为不变；
+- **结果包提取**：`extract_result` 把结果包内存流解析为 `{"pages", "images"}`，统一处理 manifest 定位、`content_v2` Schema 校验、图片路径规范化、解压后限额与错误分类。
 
 ```python
 from mineru_parser import MinerUApiClient
@@ -42,6 +43,50 @@ with MinerUApiClient() as client, ResultDownloader() as downloader:
 ```
 
 下载器默认限制单次响应体为 50 MiB、总耗时为 300 秒，并拒绝非公网目标与 HTTPS 降级重定向。若注入自定义 `requests.Session`，请将其内部重试次数设为 0（下载器的 `DownloadRetryPolicy` 是唯一重试层），且不要携带全局 `Authorization` / `Cookie` 头或 `session.auth`。
+
+## 结果包提取
+
+`extract_result` 接收任意可读、可 seek 的 ZIP 二进制流（典型为下载器交付的 `io.BytesIO`），交付结构化的页面与图片：
+
+```python
+import io
+
+from mineru_parser import canonicalize_member_path, extract_result
+
+stream = io.BytesIO(zip_bytes)  # 来源不限：下载器、缓存、本地文件或测试夹具
+extracted = extract_result(stream)
+
+pages = extracted["pages"]    # list[list[LayoutElement]]，Pydantic 模型
+images = extracted["images"]  # [{"path": "images/a.jpg", "bytes": b"..."}]
+
+# manifest 中的 image_source.path 是上游原始字符串，必须用同一套规则归一后再匹配
+by_path = {image["path"]: image for image in images}
+for page in pages:
+    for block in page:
+        source = getattr(block.content, "image_source", None)
+        if source is not None:
+            key = canonicalize_member_path(source.path)  # 可能返回 None
+            if key is not None and key in by_path:
+                ...
+```
+
+```mermaid
+flowchart LR
+    URL["结果包 URL"] --> DL["ResultDownloader.resolve<br/>→ io.BytesIO"]
+    DL --> EX["extract_result(stream)"]
+    EX --> S["DocumentContentSchema<br/>Pydantic 校验"]
+    EX --> OUT["{ pages, images }"]
+```
+
+契约要点：
+
+- 只在 ZIP **顶层**定位唯一的 `*_content_list_v2.json`；缺失或多份都失败关闭；
+- 只收集顶层 `images/` 下的常规文件；路径 canonical 化、按字典序排序、拒绝重复与不安全路径；
+- 解压后资源受 `ExtractionLimits` 限制：manifest 16 MiB、单图 32 MiB、图片总量 160 MiB、图片 10,000 张、ZIP 成员 100,000 个；
+- 不关闭调用方流，成功与失败后都会恢复游标；不落盘、不解码图片；
+- 失败按 `ResultExtractionError` 的五个子类分类（配置 / 归档 / manifest / Schema / 限额），可用 `reason` / `resource` / `category` 分支；全库失败可统一捕获 `MinerUParserError`。
+
+**内存预算**：默认限额下单次调用峰值内存约 **240 MiB**；$W = 4$ 并发时约 **960 MiB**。若部署形态不同，请用 `ExtractionLimits` 覆盖 `max_total_image_bytes`（推导见 SPEC-003 §3.2）。
 
 ## 数据管道
 

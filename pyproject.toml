@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = ["hypothesis>=6.100", "pytest>=8.3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mineru_parser"]

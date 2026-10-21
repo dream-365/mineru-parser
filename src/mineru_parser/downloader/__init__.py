@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from .._telemetry import MetricHook
+from ..errors import MinerUParserError
 from .downloader import ResultDownloader
 from .errors import (
     ResultDownloadConfigurationError,
@@ -26,6 +27,7 @@ __all__ = [
     "DnsResolver",
     "DownloadRetryPolicy",
     "MetricHook",
+    "MinerUParserError",
     "ResultDownloadConfigurationError",
     "ResultDownloadContentTypeError",
     "ResultDownloadError",
