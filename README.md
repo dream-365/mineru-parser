@@ -10,7 +10,8 @@
 - **等待边界**：支持相对超时和绝对截止时间，超时异常携带最后已知的任务状态；
 - **进度回调**：状态或解析页数变化时触发回调，便于上报进度；
 - **错误分类**：认证、额度、瞬时、执行与超时错误分别抛出，便于调用方决定重试策略；
-- **结果交付**：成功时返回 MinerU 结果包的 `zip_url`，下载与解压由调用方处理。
+- **结果交付**：成功时返回 MinerU 结果包的 `zip_url`，下载与解压由调用方处理；
+- **可选下载器**：`ResultDownloader` 把结果包 URL 流式读入 `io.BytesIO`，统一处理超时、重试、SSRF 防护与内存上限；不使用时 API 客户端行为不变。
 
 ```python
 from mineru_parser import MinerUApiClient
@@ -26,7 +27,21 @@ with MinerUApiClient() as client:  # API Key 默认读取 MINERU_API_KEY
     result = resumed.wait(timeout=600)
 ```
 
-结果只提供 MinerU 返回的 `zip_url`，下载与解压由调用方处理。
+`MinerUApiClient` 仍然只交付 `zip_url`，不负责下载与解压；需要直接拿到内存流时，可选用独立的 `ResultDownloader`：
+
+```python
+import zipfile
+
+from mineru_parser import MinerUApiClient, ResultDownloader
+
+with MinerUApiClient() as client, ResultDownloader() as downloader:
+    result = client.submit("https://example.com/paper.pdf").wait(timeout=600)
+    stream = downloader.resolve(result.zip_url)  # io.BytesIO，游标位于 0
+    with zipfile.ZipFile(stream) as archive:
+        ...
+```
+
+下载器默认限制单次响应体为 50 MiB、总耗时为 300 秒，并拒绝非公网目标与 HTTPS 降级重定向。若注入自定义 `requests.Session`，请将其内部重试次数设为 0（下载器的 `DownloadRetryPolicy` 是唯一重试层），且不要携带全局 `Authorization` / `Cookie` 头或 `session.auth`。
 
 ## 数据管道
 

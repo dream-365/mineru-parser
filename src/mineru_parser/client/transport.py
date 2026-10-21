@@ -6,17 +6,15 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
 from collections.abc import Callable
-from datetime import UTC
-from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 
 import requests
 import urllib3
 
+from .._http import parse_retry_after, retry_after_from, status_class
 from ._telemetry import Telemetry
 from ._time import elapsed_ms
 from .errors import (
@@ -63,45 +61,8 @@ def _http_status(exc: BaseException) -> int | None:
     return getattr(response, "status_code", None)
 
 
-def _status_class(status: int | None) -> str:
-    return "error" if status is None else f"{status // 100}xx"
-
-
-def parse_retry_after(value: str | None, *, now: float) -> float | None:
-    """解析 ``Retry-After``（秒数或 HTTP-date），返回非负秒数。"""
-    if value is None:
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    try:
-        seconds = float(text)
-    except ValueError:
-        try:
-            parsed = parsedate_to_datetime(text)
-        except (TypeError, ValueError):
-            return None
-        if parsed is None:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=UTC)
-        seconds = parsed.timestamp() - now
-    if not math.isfinite(seconds):
-        return None
-    return max(0.0, seconds)
-
-
 def _retry_after(response: Any, *, wall_clock: Callable[[], float]) -> float | None:
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return None
-    value = headers.get("Retry-After")
-    if value is None:
-        for key, item in headers.items():
-            if str(key).lower() == "retry-after":
-                value = item
-                break
-    return parse_retry_after(value, now=wall_clock())
+    return retry_after_from(getattr(response, "headers", None), wall_clock=wall_clock)
 
 
 class MinerUTransport:
@@ -198,7 +159,7 @@ class MinerUTransport:
             response.raise_for_status()
             payload = response.json()
         except requests.HTTPError as exc:
-            self._emit_http_metric(operation, _status_class(_http_status(exc)), started)
+            self._emit_http_metric(operation, status_class(_http_status(exc)), started)
             raise
         except (requests.RequestException, ValueError, RuntimeError):
             self._emit_http_metric(operation, "error", started)

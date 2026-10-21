@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._version import __version__
 from .client import (
     DEFAULT_POLL_POLICY,
     AsyncResult,
@@ -21,10 +22,27 @@ from .client import (
     MinerUTransientError,
     PollPolicy,
 )
+from .downloader import (
+    DEFAULT_DOWNLOAD_RETRY_POLICY,
+    DnsResolver,
+    DownloadRetryPolicy,
+    ResultDownloadConfigurationError,
+    ResultDownloadContentTypeError,
+    ResultDownloader,
+    ResultDownloadError,
+    ResultDownloadHTTPError,
+    ResultDownloadSecurityError,
+    ResultDownloadTimeoutError,
+    ResultDownloadTooLargeError,
+    ResultDownloadTransientError,
+)
 
 __all__ = [
+    "DEFAULT_DOWNLOAD_RETRY_POLICY",
     "DEFAULT_POLL_POLICY",
     "AsyncResult",
+    "DnsResolver",
+    "DownloadRetryPolicy",
     "MetricHook",
     "MinerUApiClient",
     "MinerUAuthenticationError",
@@ -40,4 +58,14 @@ __all__ = [
     "MinerUTimeoutError",
     "MinerUTransientError",
     "PollPolicy",
+    "ResultDownloadConfigurationError",
+    "ResultDownloadContentTypeError",
+    "ResultDownloadError",
+    "ResultDownloadHTTPError",
+    "ResultDownloadSecurityError",
+    "ResultDownloadTimeoutError",
+    "ResultDownloadTooLargeError",
+    "ResultDownloadTransientError",
+    "ResultDownloader",
+    "__version__",
 ]

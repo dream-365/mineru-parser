@@ -9,6 +9,7 @@ description = "Sync client for the MinerU extraction API with resumable result h
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "idna>=3.7",
     "pydantic>=2.9",
     "requests>=2.32",
     "urllib3>=2.2",
