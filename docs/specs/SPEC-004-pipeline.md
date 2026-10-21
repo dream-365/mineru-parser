@@ -102,11 +102,13 @@ flowchart LR
 | `MinerUApiClient` / `AsyncResult`                                                        | 顶层导出 | **私有化**：移出顶层，公开路径不再提供                  | 无法再导入；如需编排请使用 `parse`                        |
 | `ResultDownloader`                                                                       | 顶层导出 | **私有化**：移出顶层，公开路径不再提供                  | 无法再导入                                                |
 | `extract_result` / `canonicalize_member_path`                                            | 顶层导出 | **私有化**：移出顶层，公开路径不再提供                  | 无法再导入                                                |
-| 三族具体异常类                                                                                  | 顶层导出 | **私有化**：移出顶层，公开路径不再提供                  | 无法再导入                                                |
+| 三族具体异常类                                                                                  | 顶层导出 | **私有化**：移出顶层，公开路径不再提供                  | 无法再导入；改用 `MinerUParserError` + 类名分支，或按信封的 `error_type` 分支                     |
 | `MinerUParserError`                                                                      | 顶层导出 | **保留**（捕获全库失败所需）                    | 无需改动                                                    |
 | `ExtractedResult` / `ExtractedImage` / `ExtractionLimits` / `MetricHook` / `__version__` | 顶层导出 | **保留**（`parse` 签名/返回值所需类型）          | 无需改动                                                    |
+| `MinerUTaskStatus`                                                                       | 顶层导出 | **保留**（`on_update` 回调参数类型）           | 无需改动                                                    |
 | `PipelineStage`（新增）                                                                      | —    | **保留**（`on_error` 回调参数类型）           | —                                                       |
-| `ParseResult`（新增）                                                                        | —    | **保留**（`parse` 的返回类型）               | —                                                       |
+| `ParseResult` / `ErrorMessage`（新增）                                                        | —    | **保留**（`parse` 的返回类型）               | —                                                       |
+| `PipelineError` / `PipelineTimeoutError` / `PipelineConfigurationError`（新增）                  | —    | **保留**（管道自身的失败类型）               | —                                                       |
 
 
 > **破坏性变更登记**：顶层 `__all__` 收缩是**有意的破坏性变更**，项目版本为 `0.1.0`（未到 1.0），本期一次性完成比"分阶段弃用"更干净。README 必须同步改写（§5 Phase 4），changelog 必须记录迁移路径。
@@ -120,7 +122,7 @@ flowchart LR
 ### 1.3 目标 (Goals)
 
 - [ ] **Goal 1**：提供**唯一**的顶层公共函数 `mineru_parser.parse(uri, ...) -> ParseResult`，一次调用完成"提交 → 等待 → 下载 → 解析"，并把任务元数据（`task_id` / `data_id` / `zip_url`）随解析产物一并交付。
-- [ ] **Goal 2**：顶层 `mineru_parser.__all__` 中**只有一个可调用对象**（`parse`）；其余导出只能是类型与常量（AC-2.1 可断言）。
+- [ ] **Goal 2**：顶层 `mineru_parser.__all__` 中**只有一个函数**（`parse`）；其余导出只能是类型、异常类与常量（AC-2.1 可断言）。
 - [ ] **Goal 3**：把三组件的编排契约固化为库责任：阶段顺序、参数透传、生命周期关闭、中间产物所有权。
 - [ ] **Goal 4**：提供**单一端到端预算**（`timeout` / `deadline_epoch`），覆盖四个阶段；预算耗尽在默认信封模式下表现为 `status="failed"` + `error.stage`，在异常模式（`raise_on_error=True`）下表现为 `PipelineTimeoutError(stage=...)`。
 - [ ] **Goal 5**：失败**阶段可归因**：以封闭枚举 `PipelineStage` 标识，通过 `on_error` 回调、日志与指标标签暴露。
@@ -139,7 +141,7 @@ flowchart LR
 
 - [ ] 改动 SPEC-001 / SPEC-002 / SPEC-003 的任何公共契约、参数默认值、异常层次或限额默认值。
 - [ ] 批处理、并发调度、线程池 / 异步 / `asyncio` 版本；本期只有一个同步函数。
-- [ ] "只提交不解析"的入口（如 `parse(submit_only=True)`）：批量先提交、稍后再解析的作业模式由调用方直接使用 `mineru_parser.client` 实现，管道不提供该分支。
+- [ ] "只提交不解析"的入口（如 `parse(submit_only=True)`）：批量先提交、稍后再解析的作业模式由调用方在**管道之外**自行编排实现（组件已转为私有实现，不提供公开导入路径），管道不提供该分支。
 - [ ] **任务恢复 / 崩溃续跑**（凭外部 `task_id` 恢复等待、提前交出 `task_id` 供落库的回调）：管道保持**无状态**，不持有跨调用的任务状态，也不接受外部传入的任务标识来续跑；崩溃后未完成的任务由调用方按 `data_id` 对账处理（见 §1.1 的说明、Q-13 与 R-7）。
 - [ ] 结果包的断点续传 / 本地缓存（缓存已下载的 ZIP）：结果包体积有限，重新下载的成本可接受，缓存带来的状态与失效复杂度不划算。
 - [ ] 把 `mineru_parser.pipeline` 作为**公开**子包（允许第三方插入或扩展阶段）：公开会引入插件契约与版本耦合成本，管道实现保持内部。
@@ -209,12 +211,12 @@ flowchart LR
 
 #### 验收标准 (Acceptance Criteria)
 
-- **AC-2.1**: `mineru_parser.__all__` 中**有且只有一个可调用对象**——`parse`。其余条目必须是非可调用对象（类型、类常量、`__version__`）。该约束必须由测试断言（AC-7.4）。
-- **AC-2.2**: 顶层**必须**继续导出：`MinerUParserError`（捕获全库失败）、`ParseResult`、`ErrorMessage`、`ExtractedResult`、`ExtractedImage`、`ExtractionLimits`、`MetricHook`、`PipelineStage`、`__version__`。其中 `ParseResult` / `ErrorMessage` / `ExtractedResult` / `ExtractedImage` / `ExtractionLimits` / `MetricHook` / `PipelineStage` 是 `parse` 的签名或返回值所引用的类型。
+- **AC-2.1**: `mineru_parser.__all__` 中**有且只有一个函数**——`parse`。其余条目必须是**类型 / 异常类 / 类常量 / `__version__`**，不得出现第二个函数（包括别名、私有重导出，`parse` 的变体）。该约束必须由测试断言（AC-7.4）。**判定口径是"函数"而非"可调用对象"**：异常类与普通类同样是可调用对象（`callable(MinerUParserError)` 为真），因此断言必须按 `inspect.isfunction(x)` 或 `callable(x) and not isinstance(x, type)` 判定，否则 AC-2.2 要求保留的 `MinerUParserError` 会让断言自相矛盾。
+- **AC-2.2**: 顶层**必须**继续导出：`MinerUParserError`（捕获全库失败）、`PipelineError` / `PipelineTimeoutError` / `PipelineConfigurationError`（管道自身的失败类型）、`ParseResult`、`ErrorMessage`、`ExtractedResult`、`ExtractedImage`、`ExtractionLimits`、`MetricHook`、`PipelineStage`、`MinerUTaskStatus`、`__version__`。其中 `ParseResult` / `ErrorMessage` / `ExtractedResult` / `ExtractedImage` / `ExtractionLimits` / `MetricHook` / `PipelineStage` / `MinerUTaskStatus` 是 `parse` 的签名或返回值所引用的类型。**管道异常家族必须在顶层导出**：组件三族的具体异常类已随组件私有化而不可导入（AC-2.3），若管道异常也不导出，调用方将只剩 `MinerUParserError` 一个可捕获类型——"超时统一为 `PipelineTimeoutError`"（AC-4.4 / AC-4.5）这一语义收益将被抹平。
 - **AC-2.3**: `MinerUApiClient`、`AsyncResult`、`ResultDownloader`、`extract_result`、`canonicalize_member_path`、三族具体异常类与其他组件级名称**必须**从顶层 `__all__` 移除，**且公开导入路径必须一并关闭**：实现包改名为私有 `mineru_parser._client` / `_downloader` / `_extractor`，`mineru_parser.client` / `.downloader` / `.extractor` 不再提供，调用方**无法导入**任何组件 API。组件的行为契约（SPEC-001 / 002 / 003）作为内部实现继续成立，但不再是公共契约。
-- **AC-2.4**: 本变更属于**破坏性变更**，必须在 README 的迁移说明与本 Spec 的 changelog 中显式登记，并在 changelog 中给出"旧顶层导入 → 新子模块导入"的对照。
-- **AC-2.5**: `parse` 的**签名与返回类型**遵循 SemVer；大版本才允许破坏性变更。组件 API 标注为"内部 / 高级"，**不**遵循 SemVer（未来可调整签名而不升大版本），但行为契约由各自 SPEC 约束。
-- **AC-2.6**: 顶层**不得**出现第二个函数（包括别名、私有重导出、`parse` 的变体）；不得提供 `parse_async` / `parse_sync` 之类的并列入口（异步不在本期范围，见 Non-Goals）。
+- **AC-2.4**: 本变更属于**破坏性变更**，必须在 README 的迁移说明与本 Spec 的 changelog 中显式登记，并在 changelog 中给出"旧顶层导入 → 新公共面"的对照——组件三族的旧导入路径**全部关闭**（不存在"新子模块导入路径"），对照表须写明"无法再导入"及替代写法。
+- **AC-2.5**: `parse` 的**签名与返回类型**遵循 SemVer；大版本才允许破坏性变更。组件 API 转为**私有实现**，**不**遵循 SemVer（未来可调整签名而不升大版本），但行为契约由各自 SPEC 约束。
+- **AC-2.6**: 顶层**不得**出现第二个函数（包括别名、私有重导出、`parse` 的变体）；不得提供 `parse_async` / `parse_sync` 之类的并列入口（异步不在本期范围，见 Non-Goals）。**导出异常类不算"第二个函数"**——异常类是可调用对象，但 AC-2.1 的约束只针对**函数**。
 - **AC-2.7**: `parse` 必须从 `mineru_parser.pipeline`（内部实现模块）实现并在顶层再导出；顶层**不得**包含编排逻辑实现（编排代码必须位于 `mineru_parser.pipeline` 包内）。
 - **AC-2.8**: `mineru_parser.pipeline` 包**必须**是内部实现层：不通过顶层 `__all__` 暴露其内部名称（`PipelineOrchestrator` 等实现细节不得出现在顶层）。
 - **AC-2.9**: `parse` 的签名**不得**包含任何用于恢复历史任务的参数（如 `task_id`），顶层**不得**提供第二个用于续跑既有任务的入口（Goal 7 / Q-13）。管道**不得**声称提交是幂等的：相同 `uri` + `data_id` 的两次 `parse()` 会创建两个任务（`data_id` 按 SPEC-001 语义仅用于对账，不是幂等键），该行为必须在 README 中提示。
@@ -271,7 +273,7 @@ flowchart LR
 
 - **AC-5.1**: 必须定义封闭枚举 `PipelineStage`，取值恰好为 `config` / `submit` / `wait` / `download` / `extract`（`StrEnum`）；不得新增其他取值，也不得用自由文本表示阶段。
 - **AC-5.2**: 任一阶段失败时，管道必须在抛出前调用 `on_error(stage, exception)`，其中 `exception` 是**该阶段原始抛出的异常对象**（超时翻译前）。
-- **AC-5.3**: 在**异常模式**（`raise_on_error=True`）下，**除超时外**，阶段异常必须**原样抛出**：管道不得包装、翻译、替换或吞掉；抛出的对象必须与阶段抛出的对象**同一**（`is`），其类型、属性与异常链保持不变。因此 `except MinerUQuotaError` / `except ResultDownloadSecurityError` / `except ResultExtractionLimitError` 等既有捕获方式在 `raise_on_error=True` 下**继续有效**。在默认信封模式下，同一异常被封装为 `ErrorMessage`，其 `error.error_type` 必须等于该异常的类名（AC-1.11）。
+- **AC-5.3**: 在**异常模式**（`raise_on_error=True`）下，**除超时外**，阶段异常必须**原样抛出**：管道不得包装、翻译、替换或吞掉；抛出的对象必须与阶段抛出的对象**同一**（`is`），其类型、属性与异常链保持不变。因此**已经持有这些异常类引用**的代码（存量直接依赖组件的调用方）其既有捕获方式在 `raise_on_error=True` 下**继续有效**。但组件三族的具体异常类已随组件私有化而**不可导入**（AC-2.3），**新代码**只能以库级根异常 `MinerUParserError` 捕获后按 `type(exc).__name__` 分支，或直接捕获 `PipelineTimeoutError`（超时，AC-2.2）。在默认信封模式下，同一异常被封装为 `ErrorMessage`，其 `error.error_type` 必须等于该异常的类名（AC-1.11）——**两种模式的信息量必须一致**。
 - **AC-5.4**: 管道自身产生的失败必须使用 `PipelineError` 家族：`PipelineConfigurationError`（配置或参数非法）与 `PipelineTimeoutError`（端到端预算耗尽）。二者均继承 `PipelineError`，而 `PipelineError` 继承库级根 `MinerUParserError`。
 - **AC-5.5**: `on_error` 抛出的任何异常必须被吞掉并记录 `mineru.pipeline.on_error.failed` 警告日志，不得影响主流程。
 - **AC-5.6**: `on_metric` 抛出的任何异常必须被吞掉并记录 `mineru.metric.failed` 警告日志（与 SPEC-001/002/003 的既有约定一致）。
@@ -314,7 +316,7 @@ flowchart LR
 - **AC-7.1**: 全部行为必须可在**无网络**环境下测试：client 与 downloader 的替身必须能经**内部**测试缝接入（AC-7.8），时钟必须可注入（AC-4.9）。
 - **AC-7.2**: 测试必须覆盖：四阶段成功路径（submit / wait / download / extract 各一次）、四个阶段的失败路径、预算耗尽（分别在四个阶段边界触发）、信封与异常**双模式**的等价性、异常原样抛出、组件与流的关闭、回调隔离。
 - **AC-7.3**: 必须包含"**异常同一性**"测试：在异常模式（`raise_on_error=True`）下，对每个阶段的失败，断言 `parse()` 抛出的对象与替身阶段抛出的对象 `is` 相同（超时除外，超时必须断言 `__cause__` 指向原始超时异常）；在默认信封模式下，断言 `error.error_type` 等于该异常的类名。
-- **AC-7.4**: 必须包含"**顶层 API 面**"测试：断言 `mineru_parser.__all__` 中的可调用对象恰好只有 `parse`，且 AC-2.2 要求保留的名称均存在、AC-2.3 要求移除的名称均不存在、`mineru_parser.client` / `.downloader` / `.extractor` **不再可导入**（AC-2.3）。
+- **AC-7.4**: 必须包含"**顶层 API 面**"测试：断言 `mineru_parser.__all__` 中的**函数**恰好只有 `parse`（按"函数"判定而非"可调用对象"，见 AC-2.1），且 AC-2.2 要求保留的名称均存在、AC-2.3 要求移除的名称均不存在、`mineru_parser.client` / `.downloader` / `.extractor` **不再可导入**（AC-2.3）。
 - **AC-7.5**: **公共面**的默认构造路径必须被覆盖：使用**本地回环地址**的 mock HTTP 服务提供 `/extract/task` 与 `/extract/task/{id}`（客户端无 SSRF 限制，允许回环），并经内部测试缝替换 downloader 覆盖下载阶段（下载器的 SSRF 防护会拒绝回环地址，这是刻意行为，不得为测试放宽）。
 - **AC-7.6**: 测试不得依赖真实 MinerU 服务、真实 CDN、真实外网地址或真实 API 凭据；`MINERU_API_KEY` 必须由测试**自行设置**（monkeypatch 为占位值），不得读取开发机上的真实环境变量。
 - **AC-7.7**: 管道实现必须是无状态的纯编排：不得引入模块级可变状态、不得使用全局单例、不得在导入时发起网络请求。
@@ -445,7 +447,7 @@ src/mineru_parser/
 
 #### 阶段枚举
 
-`PipelineStage` 为 `StrEnum`，取值恰好四个：
+`PipelineStage` 为 `StrEnum`，取值恰好五个（四个**执行**阶段 + 参数校验阶段 `config`）：
 
 
 | 取值         | 含义                           |
@@ -476,7 +478,7 @@ MinerUParserError                  # 库级公共根异常（既有）
 
 | 异常                           | 附加字段                                                                                | 说明                                                                                                                                                                                        |
 | :---------------------------- | :----------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PipelineConfigurationError` | `field: str | None`                                                                 | 参数名（如 `uri` / `limits` / `client` / `downloader` / `timeout` / `deadline_epoch` / `on_error` / `on_update` / `on_metric` / `correlation_id`）；未指明时为 `None` |
+| `PipelineConfigurationError` | `field: str | None`                                                                 | 参数名（如 `uri` / `limits` / `timeout` / `deadline_epoch` / `on_error` / `on_update` / `on_metric` / `correlation_id`）；未指明时为 `None` |
 | `PipelineTimeoutError`       | `stage: PipelineStage`、`task_id: str | None`、`last_status: MinerUTaskStatus | None` | `last_status` 仅在等待阶段超时时可得（继承 SPEC-001 AC-4.3）；`__cause__` 为被翻译的原始超时异常                                                                                                                     |
 
 
@@ -593,7 +595,7 @@ def parse(
 | 层级                  | 名称                                                                                                                                                 | 承诺                      |
 | :------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------- |
 | **稳定（唯一函数）**        | `parse`                                                                                                                                            | 遵循 SemVer；大版本才允许破坏性变更   |
-| **稳定（类型）**          | `ParseResult`、`ErrorMessage`、`ExtractedResult`、`ExtractedImage`、`ExtractionLimits`、`PipelineStage`、`MinerUTaskStatus`、`MetricHook`、`MinerUParserError` | 跟随 `parse` 的稳定性         |
+| **稳定（类型）**          | `ParseResult`、`ErrorMessage`、`ExtractedResult`、`ExtractedImage`、`ExtractionLimits`、`PipelineStage`、`MinerUTaskStatus`、`MetricHook`、`MinerUParserError`、`PipelineError`、`PipelineTimeoutError`、`PipelineConfigurationError` | 跟随 `parse` 的稳定性         |
 | **内部 / 不遵循 SemVer** | `mineru_parser.pipeline` 包内名称、三个私有组件包（`_client` / `_downloader` / `_extractor`）内的全部 API | 可调整；行为契约由各自 SPEC 约束     |
 
 
@@ -611,7 +613,7 @@ def parse(
 
 #### 返回契约
 
-1. **完整性**：只有四个阶段全部成功才返回 `status="success"`；失败一律返回 `status="failed"`，**不返回部分产物**（`data` 必须为 `None`，对齐 SPEC-003 AC-3.10 / AC-4.11）。
+1. **完整性**：只有四个阶段全部成功才返回 `status="success"`；失败一律返回 `status="failed"`，**不返回部分产物**（`data` 必须为 `None`，对齐 SPEC-003 AC-3.10 / SPEC-003 AC-4.11）。
 2. **形状**：`ParseResult`，恰好 `status`、`data`、`task_id`、`data_id`、`zip_url`、`error` 六个键（AC-1.1）；`data` 是 `ExtractedResult`，与 `extract_result` 的返回值逐字相同。
 3. **独立性**：全新对象，不与内部流共享生命周期（AC-1.4 / AC-3.4）。
 4. **无重试**：管道不重放整链；阶段内部的重试由各组件负责（Non-Goals）。
@@ -666,22 +668,25 @@ result = parse(
 ```
 
 ```python
-from mineru_parser import parse
-from mineru_parser.client import MinerUAuthenticationError, MinerUQuotaError
-from mineru_parser.extractor import ResultExtractionLimitError
+from mineru_parser import MinerUParserError, PipelineTimeoutError, parse
 
 # 需要"按异常类型分支"时，显式开启异常模式
 try:
     result = parse("https://example.com/paper.pdf", timeout=600, raise_on_error=True)
-except MinerUQuotaError:
-    ...                              # 额度耗尽：可退避后重试
-except ResultExtractionLimitError:
-    ...                              # 该结果包超出本环境预算：终态，调整 limits
-except Exception:
-    ...                              # 兜不住的异常：原样抛出
+except PipelineTimeoutError as exc:
+    ...                              # 端到端预算耗尽：exc.stage 标识耗尽阶段
+except MinerUParserError as exc:
+    # 组件三族的具体异常类已私有化，不可按类型导入（AC-2.3 / AC-2.8）；
+    # 统一用库级根异常捕获后按类名分支——与信封模式的 error["error_type"] 等价
+    if type(exc).__name__ == "MinerUQuotaError":
+        ...                          # 额度耗尽：可退避后重试
+    elif type(exc).__name__ == "ResultExtractionLimitError":
+        ...                          # 该结果包超出本环境预算：终态，调整 limits
+    else:
+        raise
 ```
 
-> 上例中具体的阶段异常类**从子模块导入**（顶层不再导出，AC-2.3）；`PipelineTimeoutError` 与 `PipelineConfigurationError` 则从顶层 `mineru_parser` 导入。
+> 上例中**只有** `MinerUParserError` 与 `PipelineTimeoutError` 可从顶层 `mineru_parser` 导入（AC-2.2）；组件三族的具体异常类随组件私有化而**不再提供任何导入路径**（AC-2.3），因此新代码按类名分支。存量直接依赖组件的代码不受影响——阶段异常在异常模式下**原样抛出**（AC-5.3），其既有的 `except MinerUQuotaError` 之类的捕获方式继续有效。
 >
 > **默认是信封，异常是选项**：不写 `raise_on_error=True` 时，**已知**失败不会抛出，而是变成 `status="failed"` + `error`；只有**兜不住**的异常（未知类型、`MemoryError`、`KeyboardInterrupt`、`SystemExit`）才一定会抛出来。
 
@@ -694,7 +699,7 @@ except Exception:
 
 | #   | 阶段     | 动作                                                                                                 | 失败结果                                                                         | 依据                                         |
 | :---: | :------ | :-------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- | :------------------------------------------ |
-| 1   | 参数校验   | 校验 `uri` 非空、`timeout` / `deadline_epoch` 互斥、回调可调用性、`limits` 类型、`correlation_id` 类型  | `PipelineConfigurationError(field=...)`                                      | AC-4.1 / AC-5.4 / AC-6.7                   |
+| 1   | 参数校验   | 校验 `uri` 非空、`timeout` / `deadline_epoch` 互斥、回调可调用性、`limits` 类型、`correlation_id` 类型  | `PipelineConfigurationError(field=...)`                                      | AC-4.1 / AC-5.4 / SPEC-003 AC-6.7                   |
 | 2   | 预算建立   | 由 `timeout` 或 `deadline_epoch` 换算剩余预算；换算后剩余 $\le 0$ 立即失败                                           | `PipelineTimeoutError(stage="submit")`                                       | AC-4.2 / AC-4.3                            |
 | 3   | 组件准备   | 自建 client 与 downloader（无注入路径）                                                                        | —（构造失败按未知异常处理，AC-5.10）                        | AC-1.3 / AC-2.10 / AC-3.1                  |
 | 4   | 提交     | `client.submit(uri, model_version=..., data_id=...)`                                              | `MinerUError` 子类原样抛出                                                         | AC-1.2 / AC-5.3                            |
@@ -878,7 +883,7 @@ $$
 ### Phase 1: 契约与骨架
 
 - [ ] 定义 `PipelineStage` 枚举、`PipelineError` / `PipelineConfigurationError` / `PipelineTimeoutError` 异常体系（`mineru_parser/pipeline/errors.py`、`stages.py`）
-- [ ] 定义 `ParseResult` 类型（`pages` / `images` + `task_id` / `data_id` / `zip_url`，结构化继承 `ExtractedResult`）并从顶层导出
+- [ ] 定义 `ParseResult`（六键信封：`status` / `data` / `task_id` / `data_id` / `zip_url` / `error`，`data` 为独立的 `ExtractedResult`，**不继承**）与 `ErrorMessage`（四字段）类型，并从顶层导出
 - [ ] 建立 `mineru_parser/pipeline` 包与 `orchestrator.py` 骨架（阶段状态机 + 生命周期骨架）
 - [ ] 实现端到端预算模块（`budget.py`）：`timeout` / `deadline_epoch` 换算、剩余预算计算、检查点
 - [ ] 顶层 `__init__.py` 收缩为"一个函数 + 必要类型"（AC-2.1 / AC-2.2 / AC-2.3），同步删除被移除的顶层导出
@@ -899,19 +904,20 @@ $$
 - [ ] **双模式**测试：同一失败在信封模式与异常模式下的信息量必须一致（AC-1.11 / AC-1.12）
 - [ ] 异常同一性测试（AC-7.3，异常模式）：断言抛出对象 `is` 阶段抛出对象
 - [ ] 兜不住异常的传播测试（AC-5.14）：未知异常 / `MemoryError` 在两种模式下都必须原样抛出
-- [ ] 顶层 API 面测试（AC-7.4）：唯一可调用对象断言 + 保留 / 移除名单断言
+- [ ] 顶层 API 面测试（AC-7.4）：唯一**函数**断言（按"函数"而非"可调用对象"判定，AC-2.1）+ 保留 / 移除名单断言
 - [ ] 默认构造路径测试（AC-7.5）：本地 mock HTTP 服务 + 内部测试缝替换 downloader
 - [ ] 全量回归：`tests/test_client.py` / `test_downloader.py` / `test_extractor.py` / `test_extractor_property.py` 必须全部通过
 
 ### Phase 4: 文档与迁移
 
-- [ ] README 重写：快速开始改为 `parse()` 单函数形态；删除三组件的手写编排样板
-- [ ] README 补写：顶层 API 面（唯一函数）、迁移表（§1.2）、峰值内存 290 MiB 与并发度指引（§3.5）、超时语义（统一 `PipelineTimeoutError`，含"统一捕获超时"的三类写法）
-- [ ] README 补写：`ParseResult` 的六个键与元数据来源；`ErrorMessage` 的四个字段；`zip_url` 作为敏感值的处理提示
-- [ ] README 补写失败语义：**默认信封、不抛异常**，`raise_on_error=True` 才抛；已知异常封装、兜不住的抛出
-- [ ] README 补写风险提示：`data_id` 非幂等键、默认无端到端超时、崩溃后任务不可恢复（无状态设计的已知代价）
+- [x] README 重写：快速开始改为 `parse()` 单函数形态；删除三组件的手写编排样板（随 `df05cff` 落盘）
+- [x] README 补写：顶层 API 面（唯一函数）、迁移表（§1.2）、峰值内存 290 MiB 与并发度指引（§3.5）、超时语义（统一 `PipelineTimeoutError`，含捕获写法与 `__cause__` 细分）（随 `df05cff` 落盘）
+- [x] README 补写：`ParseResult` 的六个键与元数据来源；`ErrorMessage` 的四个字段；`zip_url` 作为敏感值的处理提示（随 `df05cff` 落盘）
+- [x] README 补写失败语义：**默认信封、不抛异常**，`raise_on_error=True` 才抛；已知异常封装、兜不住的抛出（随 `df05cff` 落盘）
+- [x] README 补写风险提示：`data_id` 非幂等键、默认无端到端超时、崩溃后任务不可恢复（无状态设计的已知代价）（随 `df05cff` 落盘）
+- [ ] README 顶部补"目标公共面尚未实现"的状态说明——**已随 `df05cff` 落盘**，实现落地后须删除该说明
 - [ ] 本 Spec 的 changelog 记录破坏性变更（已随初稿创建）；`docs/specs/CLAUDE.md` 若后续新增"组件清单"章节，须把 SPEC-004 补入
-- [ ] 各组件 SPEC（001 / 002 / 003）的"由顶层导出"表述同步回写为"内部 / 高级"
+- [ ] 各组件 SPEC（001 / 002 / 003）的"由顶层导出"表述同步回写为"内部实现"
 
 ### AC ↔ 测试映射（计划）
 
@@ -929,7 +935,7 @@ $$
 | AC-1.10                  | `test_zip_url_never_logged_or_labelled`                             |
 | AC-1.11                  | `test_known_errors_wrapped_and_unknown_propagated`                 |
 | AC-1.12                  | `test_failed_envelope_shape_and_partial_metadata`                  |
-| AC-2.1 / AC-2.2 / AC-2.3 | `test_top_level_exports_exactly_one_callable`                       |
+| AC-2.1 / AC-2.2 / AC-2.3 | `test_top_level_exports_exactly_one_function`                        |
 | AC-2.4                   | （文档项，由 README / changelog 评审核对）                                     |
 | AC-2.5                   | `test_parse_signature_is_stable`（签名快照）                              |
 | AC-2.6                   | `test_top_level_has_no_second_function`                             |
@@ -980,33 +986,34 @@ $$
 
 | 编号       | 风险 / 问题描述                              | 潜在影响                                                              | 缓解 / 规避方案                                                                                            | 状态 / 负责人       |
 | :-------- | :-------------------------------------- | :----------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------- | :-------------- |
-| `[R-1]`  | **顶层 API 收缩是破坏性变更**                    | 既有用户 `from mineru_parser import ResultDownloader` 直接报 ImportError | 顶层 `__all__` 只保留 `parse` + 类型；组件 API 保留在子模块且**行为不变**；README 迁移表 + changelog 登记；项目未到 1.0，一次性收敛优于分阶段弃用 | 待评审 / @jackafx |
+| `[R-1]`  | **顶层 API 收缩是破坏性变更**                    | 既有用户 `from mineru_parser import ResultDownloader` 直接报 ImportError | 顶层 `__all__` 只保留 `parse` + 必要类型；组件 API 转为**私有实现**（`_client` / `_downloader` / `_extractor`），公开导入路径关闭但**行为契约不变**；README 迁移表 + changelog 登记；项目未到 1.0，一次性收敛优于分阶段弃用 | 待评审 / @jackafx |
 | `[R-2]`  | **组件私有化是破坏性变更**                       | 依赖 `from mineru_parser import ResultDownloader` 等旧导入的用户必须改写为 `parse`                    | 顶层 `__all__` 收缩 + 公开导入路径关闭（AC-2.3 / AC-2.10）；README 迁移表 + changelog 登记（项目 0.1.0，一次性收敛）        | 待评审 / @jackafx |
 | `[R-3]`  | **重复调用即重复计费**                          | 同一 URI 重复 `parse()` 产生多个任务与费用                                     | `data_id` 非幂等键的事实必须在 README 显式提示；本期不做幂等（Non-Goals）；**重复调用抑制登记为后续优化项 B-1**（§6.3）        | 已接受 / 转 B-1 |
-| `[R-4]`  | **超时语义翻译造成捕获方式变化**                     | `except MinerUTimeoutError` 不再捕获 `parse()` 的等待超时                  | 统一为 `PipelineTimeoutError` 并在 README 明示；`__cause__` 保留原始异常，需要时可从 `__cause__` 细分                      | 待评审 / @jackafx |
+| `[R-4]`  | **超时语义翻译造成捕获方式变化**                     | `except MinerUTimeoutError` 不再捕获 `parse()` 的等待超时                  | 统一为 `PipelineTimeoutError`（**顶层导出**，AC-2.2）并在 README 明示；`__cause__` 保留原始异常，需要时可从 `__cause__` 细分                      | 待评审 / @jackafx |
 | `[R-5]`  | **端到端预算无法中断下载**                        | 下载阶段可能越过预算，浪费一次下载                                                 | 文档化已知限制（AC-4.7）；下载器自带 `total_timeout` 作为内层上界；后续可评估给 `resolve` 增加每调用预算                                | 待评估 / @jackafx |
 | `[R-6]`  | **峰值内存数字是推导值而非实测值**                    | 部署时按 290 MiB 配置仍可能 OOM                                            | §3.5 公式与假设全部公开；README 给出并发度指引；真实并发峰值需在目标环境用 `tracemalloc` 标定（承接 SPEC-003 R-3）                        | 待标定 / @jackafx |
 | `[R-7]`  | **管道无状态，崩溃后任务不可恢复**          | 等待途中崩溃会留下一个无人认领的服务端任务（可能计费）                        | 明确列为非目标（§1.4 / Q-13 / Goal 7）；调用方按 `data_id` 对账；README 显式提示该代价   | 已接受 / @jackafx |
 | `[R-8]`  | **阶段归因依赖调用方提供 `on_error`**             | 不提供回调时，失败阶段只能从日志 / 指标中读                                           | 阶段信息同时进入 `mineru.pipeline.error` 日志与 `mineru.pipeline.total{stage}` 指标，标签低基数可直接聚合                    | 已缓解 / @jackafx |
 | `[R-9]`  | **管道层引入新的失败模式**（预算、翻译、回调）              | 故障面变多，排查成本上升                                                      | 管道自身失败只有两类（配置 / 超时），且均在**任何网络副作用之前**或**超时翻译**中产生；组件异常零改写（AC-5.3）                                     | 已缓解 / @jackafx |
-| `[R-10]` | **组件 API 失去顶层导出后，组件的可发现性下降**           | 用户难以发现"还能直接用组件"                                                   | README 的"核心模块"章节保留三组件说明并标注"内部 / 高级"，指向子模块导入路径                                                        | 待处理 / @jackafx |
+| `[R-10]` | **组件 API 失去顶层导出后，组件的可发现性下降**           | 用户难以发现"还能直接用组件"                                                   | README 保留三组件说明并标注"内部实现（不对外）"，**不给出导入路径**（公开路径已关闭，AC-2.3）；组件行为契约由各自 SPEC 约束，文档链接指回 SPEC-001 / 002 / 003 | 已处理 / @jackafx |
 | `[R-11]` | **`parse()` 每次调用自建 Session，跨调用无连接池复用** | 高频小任务场景下 TLS 握手开销显著                                               | 记录为已知代价；组件不可注入（AC-2.10），本期不引入全局会话缓存（Non-Goals）                               | 待评估 / @jackafx |
 | `[R-12]` | **管道不改变组件契约，但组合效应未被契约测试覆盖**            | 三者组合后的边界（如"下载成功但提取超限"）可能在生产首次暴露                                   | 契约测试覆盖组合路径（§5 AC 映射）；边界表逐条列出组合场景（§4）                                                                 | 待处理 / @jackafx |
 | `[R-13]` | **信封模式把"业务失败"与"内部错误"放进同一条返回路径** | 只看 `status` 的调用方可能忽略 `error.error_type` 里的类名，排查变慢 | 兜不住的异常**不封装**、直接抛出（AC-1.11 / AC-5.10）；已知异常一律带 `error_type` 类名；`outcome="unexpected"` 指标与带 traceback 的错误日志保证可观测（AC-5.14） | 已缓解 / @jackafx |
 | `[R-14]` | **组件不可注入，公共面无测试缝** | 下载阶段无法在无网络下端到端测试（下载器拒绝回环地址）；只能依赖内部实现层的接缝 | 公共签名不含任何组件参数（AC-2.10）；内部编排器保留**私有**测试缝，仅 `mineru_parser.pipeline` 内部可见（AC-7.8）；测试经内部缝注入替身，公共面另做"不暴露"断言 | 已缓解 / @jackafx |
+| `[R-15]` | **组件异常类私有化后，调用方无法按具体类型捕获** | 组件三族的具体异常类不再有任何导入路径（AC-2.3），新代码只剩 `MinerUParserError` 一个可捕获的根异常，细粒度分支退化为"按类名判断" | 管道异常家族（`PipelineError` / `PipelineTimeoutError` / `PipelineConfigurationError`）**在顶层导出**（AC-2.2），保住"统一捕获超时"这一唯一高频分支；组件失败的细粒度分支统一走 `type(exc).__name__`（异常模式）或 `error["error_type"]`（信封模式），两者信息量一致（AC-5.3）；README 显式给出两种模式的分支写法 | 已缓解 / @jackafx |
 
 
 ### 6.2 待决事项 (Open Questions)
 
 > **已闭环（划线/归档）：**
 >
-> - [x] ~~`Q-0`：顶层 API 面如何收敛？~~ → **决策**：顶层只保留 `parse` 一个函数 + 签名/返回值所需的类型；组件 API 降级为子模块导入的"内部 / 高级"层，不遵循 SemVer（见 §1.2 与 AC-2.1 \~ AC-2.8）。
+> - [x] ~~`Q-0`：顶层 API 面如何收敛？~~ → **决策**：顶层只保留 `parse` 一个函数 + 签名/返回值所需的类型；组件 API 转为**私有实现**，不提供公开导入路径，不遵循 SemVer（见 §1.2 与 AC-2.1 \~ AC-2.8）。
 > - [x] ~~`Q-1`：端到端预算由谁负责？~~ → **决策**：由管道提供单一 `timeout` / `deadline_epoch`，覆盖四个阶段；等待阶段把剩余预算下传给 client（AC-4.2 / AC-4.4）。
 > - [x] ~~`Q-2`：超时异常是否统一？~~ → **决策**：统一为 `PipelineTimeoutError(stage=...)`，其余阶段异常原样透传（AC-4.4 / AC-4.5 / AC-5.3）。
 > - [x] ~~`Q-3`：`PipelineTimeoutError` 是否**同时**继承 `MinerUTimeoutError`？~~ → **决策**：**保持独立**——只继承 `PipelineError`，四个异常家族继续互不继承（AC-5.4）。代价是"统一捕获超时"需显式列出三个超时类型，README 必须给出该写法。
 > - [x] ~~`Q-4`：是否提供 `on_stage`（阶段进入 / 退出）回调？~~ → **决策**：**不提供**。阶段信息只经 `on_error` 回调、日志与指标暴露（AC-5.1 / AC-5.2 / AC-5.11），保持回调面最小。
 > - [x] ~~`Q-5`：结果元数据（`task_id` / `data_id` / `zip_url`）如何交付？~~ → **决策**：新增管道层类型 **`ParseResult`**（`pages` / `images` + `task_id` / `data_id` / `zip_url`），由 `parse()` 返回；`ExtractedResult` 的既有契约**不变**（AC-1.1 / AC-1.9 / AC-1.10）。
-> - [x] ~~`Q-6`：是否提供"只提交不解析"的入口（`parse(submit_only=True)`）？~~ → **决策**：**不提供**，保持入口简洁；批量作业由调用方直接使用 `mineru_parser.client`（Non-Goals）。
+> - [x] ~~`Q-6`：是否提供"只提交不解析"的入口（`parse(submit_only=True)`）？~~ → **决策**：**不提供**，保持入口简洁；批量作业由调用方在**管道之外**自行编排（组件已私有化，不提供公开导入路径）（Non-Goals）。
 > - [x] ~~`Q-7`：是否提供结果包的断点续传 / 本地缓存？~~ → **决策**：**不提供**——结果包体积有限，重新下载的成本可接受（Non-Goals）。
 > - [x] ~~`Q-10`：`mineru_parser.pipeline` 是否作为**公开**子包（允许第三方扩展阶段）？~~ → **决策**：**不公开**，管道实现保持内部；第三方插入阶段不在本期范围（AC-2.8 / Non-Goals）。
 > - [x] ~~`Q-14`：失败时 `parse()` 应该抛异常，还是返回带状态的信封？~~ → **决策**：**默认返回信封**（`status="failed"` + `ErrorMessage`），调用方默认无需 `try` / `except` 即可拿到成败与失败原因；需要按异常类型分支时显式传 `raise_on_error=True`，此时已知异常**原样抛出**（超时翻译为 `PipelineTimeoutError`）。核心规则是"**已知异常封装成错误，兜不住的往外抛**"——已知 = `MinerUParserError` 家族，兜不住 = 未知类型 + `MemoryError` / `KeyboardInterrupt` / `SystemExit`，两种模式下都原样抛出（AC-1.11 / AC-1.12 / AC-5.10 / AC-5.14）。

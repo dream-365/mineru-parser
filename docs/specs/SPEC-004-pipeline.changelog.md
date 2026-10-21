@@ -1,5 +1,22 @@
 # Changelog: SPEC-004 Pipeline
 
+## [2026-10-21] - 契约自洽修订：唯一函数判定、管道异常顶层导出、失效表述订正
+
+- **修改类型**: Fixed / Changed
+- **影响范围**: §1.2（迁移表新增三行）、§1.3（Goal 2）、§1.4（Non-Goals"只提交不解析"）、§2（AC-2.1 / AC-2.2 / AC-2.4 / AC-2.5 / AC-2.6 / AC-5.3 / AC-7.4）、§3.3（公共 API 稳定性表 / 返回契约第 1 条 / 集成示例）、§3.4（编排阶段表第 1 行）、§5（Phase 3 / Phase 4 任务项与复选框、AC↔测试映射）、§6.1（R-1 / R-4 / R-10 改写，新增 R-15）、§6.2（Q-0 / Q-6）
+- **变更原因**: 为把 README 改写为 `parse` 门面（提交 `df05cff`）做逐条核对时，发现规格自身存在四处不自洽。它们都不是措辞问题——每一处都会在实现阶段变成**写不出来的 AC**或**跑不通的示例**，因此必须在实现前修掉。
+- **具体内容**:
+  - **AC-2.1 与 AC-2.2 互相矛盾（P0）**：AC-2.1 要求 `__all__` 中"有且只有一个**可调用对象**——`parse`"，而 AC-2.2 要求保留 `MinerUParserError`——异常类是**类**，因此 `callable(MinerUParserError)` 为真。按字面实现的测试 `test_top_level_exports_exactly_one_callable` 必然失败，且 AC-2.1 自身不可满足。修订：AC-2.1 的约束对象改为"**函数**"（`parse`），并写明判定口径为 `inspect.isfunction(x)` 或 `callable(x) and not isinstance(x, type)`；其余导出允许是类型 / 异常类 / 类常量 / `__version__`。AC-2.6 补一句"导出异常类不算第二个函数"，消除歧义。Goal 2 与 AC-7.4、§5 Phase 3、AC↔测试映射同步改口径（测试名 `test_top_level_exports_exactly_one_callable` → `test_top_level_exports_exactly_one_function`）。
+  - **管道异常家族未进顶层保留清单（P0）**：AC-2.2 的保留清单只列了 `MinerUParserError`，**不含** `PipelineError` / `PipelineTimeoutError` / `PipelineConfigurationError`；但 §3.3 的集成示例写着"`PipelineTimeoutError` 与 `PipelineConfigurationError` 则从顶层 `mineru_parser` 导入"。而组件三族的具体异常类已随组件私有化而**无任何导入路径**（AC-2.3）——若管道异常也不导出，调用方就只剩 `MinerUParserError` 一个可捕获类型，AC-4.4 / AC-4.5 建立的"超时统一为 `PipelineTimeoutError`"语义收益归零。修订：AC-2.2 保留清单补入三个管道异常类，并写明理由；§1.2 迁移表、§3.3 稳定性表同步补齐（R-4 的缓解措施补注"顶层导出"）。
+  - **§3.3 集成示例引用已关闭的导入路径（P0）**：示例中的 `from mineru_parser.client import MinerUAuthenticationError, MinerUQuotaError` 与 `from mineru_parser.extractor import ResultExtractionLimitError` 与 AC-2.3（公开路径一并关闭）直接冲突——私有化之后该示例**无法导入、无法运行**。修订：示例改为顶层可导入的 `MinerUParserError` + `PipelineTimeoutError`，组件失败的细粒度分支改用 `type(exc).__name__`（与信封模式的 `error["error_type"]` 等价）；AC-5.3 的"既有捕获方式继续有效"补注适用范围——**已持有这些类引用**的存量代码继续有效，**新代码**因无法导入而走根异常分支。README 已按同一口径改写。
+  - **`MinerUTaskStatus` 未进保留清单（P1）**：该类型出现在 `on_update` 的签名里与 §3.3 的稳定性表中，却不在 AC-2.2 的清单内。修订：AC-2.2 与 §1.2 迁移表补入。
+  - **失效的"子模块导入"表述（P1）**：AC-2.4 要求 changelog 给出"旧顶层导入 → **新子模块导入**"的对照，但公开子模块路径已全部关闭，**不存在**新子模块导入路径；AC-2.5 的"组件 API 标注为'内部 / 高级'"、§1.4 与 Q-6 的"由调用方直接使用 `mineru_parser.client`"、Q-0 的"降级为子模块导入的内部 / 高级层"、R-1 的"组件 API 保留在子模块"、R-10 的"指向子模块导入路径"同属一类失效表述。修订：统一改为"**私有实现**（`_client` / `_downloader` / `_extractor`），不提供公开导入路径"；AC-2.4 的对照要求改为"旧顶层导入 → 新公共面"，并写明旧路径全部关闭、替代写法是什么；R-10 状态由"待处理"改为"已处理"（README 已随 `df05cff` 改为"内部实现（不对外）"且不给出导入路径）。
+  - **两处悬空跨规格 AC 引用（P1）**：§3.3 返回契约第 1 条的"AC-3.10 / AC-4.11"与 §3.4 编排阶段表第 1 行的"AC-6.7"都是指向 **SPEC-003** 的引用，却未加规格前缀，在本 Spec 内查无此条。修订：补上 `SPEC-003` 前缀。
+  - **新增风险 R-15**：登记"组件异常类私有化后，调用方无法按具体类型捕获"——影响是细粒度分支退化为按类名判断；缓解为管道异常家族顶层导出 + 两种模式的信息量一致（AC-5.3）+ README 给出分支写法。
+  - **§5 Phase 4 复选框回填**：README 的五项改写条目已随 `df05cff` 落盘，勾选并标注提交号；新增一条待办——README 顶部的"目标公共面尚未实现"状态说明须在实现落地后删除。
+- **说明**: 本轮**未改变任何契约语义**——四阶段编排、端到端预算与检查点、阶段归因、遥测口径、内存预算（290 MiB）、信封 / 异常双模式的信息量一致性、组件私有化的范围与"不改 SPEC-001 / 002 / 003 任何契约"的立场全部保持不变。改动集中在**公共面的可断言性**（AC-2.1 的判定口径、AC-2.2 的保留清单）与**失效表述的订正**。AC 总数仍为 67 条，编号连续无缺口；全文 AC 引用无悬空。
+- **状态**: In Review。
+
 ## [2026-10-21] - 评审修订：管道无状态、状态信封失败语义、组件私有化
 
 - **修改类型**: Changed / Added
