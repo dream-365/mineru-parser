@@ -584,7 +584,7 @@ class ResultDownloader:
 | **高级 / 测试缝** | `sleep`、`monotonic`、`wall_clock`、`random_fn`、`dns_resolver` | 签名可能随测试设计调整；生产代码优先注入 `session` |
 | **可选扩展** | `allowed_content_types`、`allowed_hosts`、`on_metric`、`correlation_id` | 行为稳定，但不承诺未来不新增参数 |
 
-所有公共名称必须通过 `mineru_parser.downloader.__all__` 与顶层 `mineru_parser.__all__` 导出；`MetricHook`、`DnsResolver` 等类型别名也必须从公共模块可导入。`User-Agent` 中的版本号必须来自 `importlib.metadata.version("mineru-parser")`（带 `PackageNotFoundError` fallback）或模块级 `__version__`，不得硬编码。
+所有实现名称必须通过 `mineru_parser._downloader.__all__` 导出；组件已随 SPEC-004 私有化，**不再由顶层 `mineru_parser.__all__` 导出**（SPEC-004 AC-2.3），`mineru_parser.downloader` 公开路径不再提供。`MetricHook`、`DnsResolver` 等类型别名也必须从该私有模块可导入。`User-Agent` 中的版本号必须来自 `importlib.metadata.version("mineru-parser")`（带 `PackageNotFoundError` fallback）或模块级 `__version__`，不得硬编码。
 
 #### 方法语义
 
@@ -1201,7 +1201,7 @@ def redact_url(url: str) -> str:
 * [ ] 实现构造参数校验（数值、策略、白名单、主机列表、保留请求头、callable、`bool` 拒绝、header token）
 * [ ] 定义公共 API 稳定性分层与版本号来源（`importlib.metadata` / `__version__`）
 * [ ] 在 `pyproject.toml` 增加 `idna` 直接依赖（与 urllib3 2.x 的 `_idna_encode` 一致）
-* [ ] 在 `mineru_parser/downloader/__init__.py` 与顶层 `mineru_parser/__init__.py` 导出公共 API
+* [ ] 在私有实现包 `mineru_parser/_downloader/__init__.py` 导出实现 API（不再由顶层导出，见 SPEC-004 AC-2.3）
 
 * [ ] **Phase 2: URL 安全与传输**
 * [ ] 实现原始字符串控制字符校验、userinfo / 端口拒绝
@@ -1234,7 +1234,7 @@ def redact_url(url: str) -> str:
 
 * [ ] **Phase 5: 库级公共根异常（SPEC-003 驱动）**
 * [ ] `ResultDownloadError` 改为同时继承库级根 `MinerUParserError`（定义于 `mineru_parser/errors.py`），既有子类层次保持不变
-* [ ] 在 `mineru_parser/downloader/__init__.py` 与顶层 `mineru_parser/__init__.py` 导出 `MinerUParserError`
+* [ ] 在私有实现包 `mineru_parser/_downloader/__init__.py` 导出 `MinerUParserError`（顶层仍导出该根异常，见 SPEC-004 AC-2.2）
 * [ ] 更新 `downloader/errors.py` 模块说明：保留"不继承 `MinerUError`"，补充"继承库级根 `MinerUParserError`，与客户端 / 提取器两条失败路径互不继承"
 * [ ] 编写继承关系断言测试（AC-8.10）：`issubclass(ResultDownloadError, MinerUParserError)` 为真；且与 `MinerUError` / `ResultExtractionError` 互不继承
 * [ ] 回归既有全部测试，确认 `except ResultDownloadError` 的捕获语义未变

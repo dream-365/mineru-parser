@@ -14,7 +14,7 @@ import requests
 import urllib3
 from requests.structures import CaseInsensitiveDict
 
-from mineru_parser import (
+from mineru_parser._downloader import (
     DEFAULT_DOWNLOAD_RETRY_POLICY,
     DownloadRetryPolicy,
     ResultDownloadConfigurationError,
@@ -1653,7 +1653,7 @@ def test_raw_read1_checks_deadline_between_partial_chunks():
 def test_transition_networks_rejected_even_if_ipaddress_reports_public(
     monkeypatch,
 ):
-    from mineru_parser.downloader import security
+    from mineru_parser._downloader import security
 
     for name in (
         "is_global",

@@ -1,7 +1,7 @@
 """``MinerUApiClient``：配置、凭证与结果句柄工厂。
 
 客户端本身不保存任务状态，也不执行轮询；``submit`` / ``resume`` 返回
-:class:`~mineru_parser.client.async_result.AsyncResult` 句柄，由句柄负责等待。
+:class:`~mineru_parser._client.async_result.AsyncResult` 句柄，由句柄负责等待。
 """
 
 from __future__ import annotations

@@ -1,101 +1,41 @@
-"""MinerU Parser 公共 API。"""
+"""MinerU Parser 公共 API。
+
+整个库对外只暴露一个函数 :func:`parse`（SPEC-004 AC-2.1 / AC-2.6）；
+其余导出都是 ``parse`` 的签名或返回值所引用的类型、异常类与版本常量。
+三个组件（client / downloader / extractor）是私有实现，不提供公开导入路径
+（SPEC-004 AC-2.3）。
+"""
 
 from __future__ import annotations
 
+from ._client.models import MinerUTaskStatus
+from ._extractor.limits import ExtractionLimits
+from ._extractor.models import ExtractedImage, ExtractedResult
+from ._telemetry import MetricHook
 from ._version import __version__
-from .client import (
-    DEFAULT_POLL_POLICY,
-    AsyncResult,
-    MetricHook,
-    MinerUApiClient,
-    MinerUAuthenticationError,
-    MinerUClient,
-    MinerUConfigurationError,
-    MinerUError,
-    MinerUExecutionError,
-    MinerUProgress,
-    MinerUQuotaError,
-    MinerUTaskResult,
-    MinerUTaskState,
-    MinerUTaskStatus,
-    MinerUTimeoutError,
-    MinerUTransientError,
-    PollPolicy,
-)
-from .downloader import (
-    DEFAULT_DOWNLOAD_RETRY_POLICY,
-    DnsResolver,
-    DownloadRetryPolicy,
-    ResultDownloadConfigurationError,
-    ResultDownloadContentTypeError,
-    ResultDownloader,
-    ResultDownloadError,
-    ResultDownloadHTTPError,
-    ResultDownloadSecurityError,
-    ResultDownloadTimeoutError,
-    ResultDownloadTooLargeError,
-    ResultDownloadTransientError,
-)
 from .errors import MinerUParserError
-from .extractor import (
-    DEFAULT_EXTRACTION_LIMITS,
-    ExtractedImage,
-    ExtractedResult,
-    ExtractionIssue,
-    ExtractionLimits,
-    ResultExtractionArchiveError,
-    ResultExtractionConfigurationError,
-    ResultExtractionError,
-    ResultExtractionLimitError,
-    ResultExtractionManifestError,
-    ResultExtractionValidationError,
-    canonicalize_member_path,
-    extract_result,
+from .pipeline import parse
+from .pipeline.errors import (
+    PipelineConfigurationError,
+    PipelineError,
+    PipelineTimeoutError,
 )
+from .pipeline.result import ErrorMessage, ParseResult
+from .pipeline.stages import PipelineStage
 
 __all__ = [
-    "DEFAULT_DOWNLOAD_RETRY_POLICY",
-    "DEFAULT_EXTRACTION_LIMITS",
-    "DEFAULT_POLL_POLICY",
-    "AsyncResult",
-    "DnsResolver",
-    "DownloadRetryPolicy",
+    "ErrorMessage",
     "ExtractedImage",
     "ExtractedResult",
-    "ExtractionIssue",
     "ExtractionLimits",
     "MetricHook",
-    "MinerUApiClient",
-    "MinerUAuthenticationError",
-    "MinerUClient",
-    "MinerUConfigurationError",
-    "MinerUError",
-    "MinerUExecutionError",
     "MinerUParserError",
-    "MinerUProgress",
-    "MinerUQuotaError",
-    "MinerUTaskResult",
-    "MinerUTaskState",
     "MinerUTaskStatus",
-    "MinerUTimeoutError",
-    "MinerUTransientError",
-    "PollPolicy",
-    "ResultDownloadConfigurationError",
-    "ResultDownloadContentTypeError",
-    "ResultDownloadError",
-    "ResultDownloadHTTPError",
-    "ResultDownloadSecurityError",
-    "ResultDownloadTimeoutError",
-    "ResultDownloadTooLargeError",
-    "ResultDownloadTransientError",
-    "ResultDownloader",
-    "ResultExtractionArchiveError",
-    "ResultExtractionConfigurationError",
-    "ResultExtractionError",
-    "ResultExtractionLimitError",
-    "ResultExtractionManifestError",
-    "ResultExtractionValidationError",
+    "ParseResult",
+    "PipelineConfigurationError",
+    "PipelineError",
+    "PipelineStage",
+    "PipelineTimeoutError",
     "__version__",
-    "canonicalize_member_path",
-    "extract_result",
+    "parse",
 ]

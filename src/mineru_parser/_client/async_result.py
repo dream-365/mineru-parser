@@ -1,7 +1,7 @@
 """``AsyncResult``：任务身份、状态缓存与终态解释。
 
 结果句柄只持有 ``task_id``、可选的 ``data_id`` 和服务端最近一次状态；
-真正的轮询节奏由 :mod:`mineru_parser.client.polling` 决定。
+真正的轮询节奏由 :mod:`mineru_parser._client.polling` 决定。
 """
 
 from __future__ import annotations

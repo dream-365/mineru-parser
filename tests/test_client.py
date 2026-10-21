@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import pytest
 import requests
 
-from mineru_parser import (
+from mineru_parser._client import (
     MinerUApiClient,
     MinerUAuthenticationError,
     MinerUConfigurationError,
@@ -18,7 +18,7 @@ from mineru_parser import (
     MinerUTimeoutError,
     PollPolicy,
 )
-from mineru_parser.client.transport import parse_retry_after
+from mineru_parser._client.transport import parse_retry_after
 
 # --- 测试替身 -------------------------------------------------------------
 
@@ -344,6 +344,18 @@ def test_callback_exception_does_not_interrupt_polling():
     assert result.zip_url == "https://cdn.example/result.zip"
 
 
+def test_callback_base_exception_does_not_interrupt_polling():
+    """SPEC-001 AC-7.2：回调抛出的任何异常都必须被吞掉。"""
+    client, _, _ = make_client([FakeResponse(submit_ok()), FakeResponse(done_ok())])
+    task = client.submit("https://example.com/doc.pdf")
+
+    def boom(_status):
+        raise MemoryError("boom")
+
+    result = task.wait(timeout=10, on_update=boom)
+    assert result.zip_url == "https://cdn.example/result.zip"
+
+
 # --- 错误重试与分类 -------------------------------------------------------
 
 
@@ -476,7 +488,7 @@ def test_unknown_state_is_retried_as_transient():
 
 def test_client_manages_its_own_session(monkeypatch):
     session = FakeSession([FakeResponse(submit_ok()), FakeResponse(done_ok())])
-    monkeypatch.setattr("mineru_parser.client.api.requests.Session", lambda: session)
+    monkeypatch.setattr("mineru_parser._client.api.requests.Session", lambda: session)
     client = MinerUApiClient(api_key="test-key")
 
     result = client.submit("https://example.com/doc.pdf").wait(timeout=10)

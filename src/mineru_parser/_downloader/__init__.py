@@ -1,7 +1,7 @@
-"""结果包下载器。
+"""结果包下载器（内部实现，不对外）。
 
-公共 API 由 :mod:`mineru_parser` 顶层统一再导出；这里同样支持
-``from mineru_parser.downloader import ...`` 的直接导入。
+本包是 SPEC-002 的私有实现，仅由 :mod:`mineru_parser.pipeline` 内部使用；
+不提供公开导入路径，也不遵循 SemVer。行为契约见 SPEC-002。
 """
 
 from __future__ import annotations
