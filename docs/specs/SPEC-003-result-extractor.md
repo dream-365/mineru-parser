@@ -35,7 +35,7 @@ flowchart LR
 
     subgraph LIB["mineru-parser（本库）"]
         EX["extract_result(stream)<br/>ZIP → pages + images"]
-        SCHEMA["schema/content_v2.py<br/>DocumentSchema"]
+        SCHEMA["schema/content_v2.py<br/>DocumentContentSchema"]
     end
 
     subgraph DOWNSTREAM["下游"]
@@ -44,7 +44,7 @@ flowchart LR
 
     API -- "zip_url" --> DL
     DL -- "ZIP 内存流" --> EX
-    EX -- "TypeAdapter[DocumentSchema]" --> SCHEMA
+    EX -- "TypeAdapter[DocumentContentSchema]" --> SCHEMA
     EX -- "{ pages, images }" --> BIZ
 
     style UPSTREAM fill:#fce4ec,stroke:#ad1457,stroke-width:1px
@@ -60,7 +60,7 @@ flowchart LR
 | :--- | :---: | :---: | :---: |
 | 统一入口 `extract_result(stream)` | ❌ | ⚠️ 形态不一 | ✅ |
 | Manifest 唯一性检查 | ❌ | ⚠️ 常取第一个 | ✅ `not_found` / `ambiguous` |
-| `content_v2` Schema 校验 | ⚠️ 手写取值 | ⚠️ 各自实现 | ✅ `TypeAdapter[DocumentSchema]` |
+| `content_v2` Schema 校验 | ⚠️ 手写取值 | ⚠️ 各自实现 | ✅ `TypeAdapter[DocumentContentSchema]` |
 | 图片路径规范化 | ❌ | ⚠️ 依赖 ZIP 原样 | ✅ 规范化 + 安全校验 |
 | 确定性排序 | ❌ | ❌ | ✅ 按 canonical path |
 | 重复 / 不安全成员检测 | ❌ | ❌ | ✅ |
@@ -72,7 +72,7 @@ flowchart LR
 | 可观测性 | ❌ | ❌ | ✅ 日志 / 指标统一出口 |
 | 无网络、内存 ZIP 测试 | ⚠️ | ⚠️ | ✅ 纯函数 |
 
-> **样本基线（2026-10-21）**：用一个最小真实结果包核对，ZIP 共 7 个成员：`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`。manifest 4,803 B，已用 `TypeAdapter(DocumentSchema)` 校验通过（1 页、6 个块：TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；ImageBlock 的 `image_source.path` 为 `images/<sha256>.jpg`，与图片成员路径一致；图片 1 张、13,936 B。该样本确认「根目录 manifest + 根 `images/`」布局与默认限额的宽松度，但样本量不足以校准 P95/P99，真实样本统计仍见 R-1。
+> **样本基线（2026-10-21）**：用一个最小真实结果包核对，ZIP 共 7 个成员：`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`。manifest 4,803 B，已用 `TypeAdapter(DocumentContentSchema)` 校验通过（1 页、6 个块：TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；ImageBlock 的 `image_source.path` 为 `images/<sha256>.jpg`，与图片成员路径一致；图片 1 张、13,936 B。该样本确认「根目录 manifest + 根 `images/`」布局与默认限额的宽松度，但样本量不足以校准 P95/P99，真实样本统计仍见 R-1。
 >
 > **为什么不直接内联十几行代码？** 单个正常包确实只需要 `ZipFile` 加两次读取；本组件的价值在于把“定位唯一 manifest、Schema 校验、路径安全、解压后限额、错误分类、流生命周期”收敛成可测试的公共契约。实现预计约 300–500 行，主要成本在边界与测试，而不是解析本身。
 
@@ -80,7 +80,7 @@ flowchart LR
 
 - [ ] **Goal 1**：提供统一入口 `extract_result(stream) -> ExtractedResult`，接收可 seek 的二进制流，交付 `{"pages", "images"}`。
 - [ ] **Goal 2**：在 ZIP 内任意深度定位**唯一**的 `*_content_list_v2.json`；缺失或多份均失败关闭。
-- [ ] **Goal 3**：使用 `schema/content_v2.py` 的 `DocumentSchema` 完成 JSON 与 Schema 校验，错误携带字段路径且不泄漏正文。
+- [ ] **Goal 3**：使用 `schema/content_v2.py` 的 `DocumentContentSchema` 完成 JSON 与 Schema 校验，错误携带字段路径且不泄漏正文。
 - [ ] **Goal 4**：提取 manifest 同级 `images/` 目录下的全部常规文件，交付 canonical path 与精确二进制内容，输出顺序确定。
 - [ ] **Goal 5**：对 manifest 与图片实施解压后字节数、图片数量上限，失败时不返回任何部分结果。
 - [ ] **Goal 6**：建立稳定的错误分类：配置、压缩包、manifest、Schema、限额。
@@ -135,7 +135,7 @@ flowchart LR
 #### 验收标准 (Acceptance Criteria)
 
 * **AC-1.1**: `extract_result(stream, *, limits=None, on_metric=None, correlation_id=None)` 必须接受 `io.BytesIO` 或任意可读、可 seek 的二进制流；不得依赖网络、磁盘或环境变量，不得写临时文件，不得调用 `stream.close()`。
-* **AC-1.2**: 成功时必须返回新的普通 `dict`，且恰好包含 `"pages"` 与 `"images"` 两个键。`pages` 必须是 `schema.content_v2.DocumentSchema` 校验后的对象（外层列表为页，内层列表为版面块，保持 manifest 中的顺序）；`images` 必须是 `{"path": str, "bytes": bytes}` 列表，并按 `path` 升序排序。
+* **AC-1.2**: 成功时必须返回新的普通 `dict`，且恰好包含 `"pages"` 与 `"images"` 两个键。`pages` 必须是 `schema.content_v2.DocumentContentSchema` 校验后的对象（外层列表为页，内层列表为版面块，保持 manifest 中的顺序）；`images` 必须是 `{"path": str, "bytes": bytes}` 列表，并按 `path` 升序排序。
 * **AC-1.3**: `images[].bytes` 必须是不可变 `bytes` 对象，内容为 ZIP 成员解压后的精确字节；不得解码、转码或重新编码。`images[].path` 必须是使用 `/` 分隔的 canonical 归档相对路径。
 * **AC-1.4**: 每次调用必须返回全新对象，不得缓存或复用上一次结果；相同输入字节与相同 `limits` 必须产生等价结果。
 * **AC-1.5**: 不得修改输入流内容；成功与所有已处理失败路径都必须把游标恢复到调用前位置。恢复失败时必须记录 `mineru.extract.restore_failed` 警告日志，但不得覆盖主要成功/失败结果。
@@ -177,8 +177,8 @@ flowchart LR
 * **AC-3.1**: 读取前若 `ZipInfo.file_size > max_manifest_bytes`，必须抛出 `ResultExtractionLimitError(resource="manifest", limit=..., actual=file_size, member=path)`。读取时最多读取 `max_manifest_bytes + 1` 字节；实际字节超限时抛出同一异常并令 `actual=len(data)`。声明大小只是提示，实际字节是最终判据。
 * **AC-3.2**: 加密 manifest（`flag_bits & 0x1`，或 `zipfile` 抛出加密相关 `RuntimeError`）→ `ResultExtractionArchiveError(reason="encrypted_member", member=path)`；不支持的压缩方法 → `reason="unsupported_compression"`；CRC / 解压 / 截断 / `LargeZipFile` → `reason="corrupt_member"`；底层流 I/O 失败 → `reason="read_failed"`。
 * **AC-3.3**: 必须按 UTF-8 解码，并允许去除一个可选的 UTF-8 BOM。`UnicodeDecodeError` → `ResultExtractionManifestError(reason="invalid_encoding", manifest_path=path)`。不得猜测其他编码。
-* **AC-3.4**: 必须使用模块级 `TypeAdapter(DocumentSchema)` 的 `validate_json(text)` 完成 JSON 与 Schema 校验。Pydantic `ValidationError` 中包含 `json_invalid` 类型 → `ResultExtractionManifestError(reason="invalid_json", manifest_path=path)`；`RecursionError` → `ResultExtractionManifestError(reason="too_deep", manifest_path=path)`。
-* **AC-3.5**: JSON 合法但不符合 `DocumentSchema` → `ResultExtractionValidationError`，携带 `manifest_path`、清洗后的 `issues`（仅 `loc` / `type` / `msg`，最多 20 条）与完整 `issue_count`。异常消息与 traceback 不得包含 manifest 正文；必须使用 `from None` 或等价方式切断原始 `ValidationError` 的显式因果链。
+* **AC-3.4**: 必须使用模块级 `TypeAdapter(DocumentContentSchema)` 的 `validate_json(text)` 完成 JSON 与 Schema 校验。Pydantic `ValidationError` 中包含 `json_invalid` 类型 → `ResultExtractionManifestError(reason="invalid_json", manifest_path=path)`；`RecursionError` → `ResultExtractionManifestError(reason="too_deep", manifest_path=path)`。
+* **AC-3.5**: JSON 合法但不符合 `DocumentContentSchema` → `ResultExtractionValidationError`，携带 `manifest_path`、清洗后的 `issues`（仅 `loc` / `type` / `msg`，最多 20 条）与完整 `issue_count`。异常消息与 traceback 不得包含 manifest 正文；必须使用 `from None` 或等价方式切断原始 `ValidationError` 的显式因果链。
 * **AC-3.6**: 根必须是 `list[list[LayoutElement]]`。未知块 `type`、缺少必填字段、根结构错误、非法 `bbox` 都必须产生 Schema 校验错误。
 * **AC-3.7**: `[]` 是合法文档 → `pages=[]`；`[[]]` 在 Schema 下也是合法页。空文档与空页不得被视为错误。
 * **AC-3.8**: 校验必须原样使用 `content_v2` 的语义：不得设置 `strict=True`、不得设置 `extra="forbid"`、不得修改模型。已知块中的额外字段按 Pydantic 默认忽略；未知块 `type` 由判别联合拒绝。
@@ -299,7 +299,7 @@ flowchart LR
 src/mineru_parser/
 ├── _telemetry.py               # 既有共享实现
 ├── schema/
-│   └── content_v2.py           # DocumentSchema（不修改）
+│   └── content_v2.py           # DocumentContentSchema（不修改）
 └── extractor/
     ├── __init__.py             # 公共再导出
     ├── extractor.py            # extract_result 编排
@@ -319,7 +319,7 @@ sequenceDiagram
     actor Caller as 调用方
     participant EX as extract_result
     participant ZF as zipfile.ZipFile
-    participant VA as TypeAdapter[DocumentSchema]
+    participant VA as TypeAdapter[DocumentContentSchema]
 
     Caller->>EX: extract_result(stream, limits=...)
     EX->>EX: 校验 hooks / limits / stream；记录游标
@@ -387,7 +387,7 @@ DEFAULT_EXTRACTION_LIMITS = ExtractionLimits()
 ```python
 from typing import TypedDict
 
-from ..schema.content_v2 import DocumentSchema
+from ..schema.content_v2 import DocumentContentSchema
 
 
 class ExtractedImage(TypedDict):
@@ -396,7 +396,7 @@ class ExtractedImage(TypedDict):
 
 
 class ExtractedResult(TypedDict):
-    pages: DocumentSchema
+    pages: DocumentContentSchema
     images: list[ExtractedImage]
 
 
@@ -406,11 +406,11 @@ class ExtractionIssue(TypedDict):
     msg: str
 ```
 
-运行时 `ExtractedResult` 是普通 `dict`；`TypedDict` 只提供静态类型与文档约束。`DocumentSchema = list[Page]`，`Page = list[LayoutElement]`，因此 `pages` 是“页列表的列表”。
+运行时 `ExtractedResult` 是普通 `dict`；`TypedDict` 只提供静态类型与文档约束。`DocumentContentSchema = list[Page]`，`Page = list[LayoutElement]`，因此 `pages` 是“页列表的列表”。
 
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `pages` | `DocumentSchema` | 按 manifest 顺序；每页是版面块模型列表；页号等于下标 + 1 |
+| `pages` | `DocumentContentSchema` | 按 manifest 顺序；每页是版面块模型列表；页号等于下标 + 1 |
 | `images[].path` | `str` | canonical 归档相对路径；根目录 manifest 时为 `images/...` |
 | `images[].bytes` | `bytes` | ZIP 成员解压后的精确字节；不转码 |
 
@@ -425,7 +425,7 @@ class ExtractionIssue(TypedDict):
 | `_MAX_ISSUES_IN_ERROR` | `20` | `ValidationError.issues` 上限 |
 | `_MAX_CANDIDATES_IN_ERROR` | `20` | `ManifestError.candidates` 上限 |
 | `_MAX_CONTEXT_CHARS` | `512` | 日志 / 错误上下文字符上限 |
-| `_SCHEMA` | `TypeAdapter(DocumentSchema)` | 模块级校验器 |
+| `_SCHEMA` | `TypeAdapter(DocumentContentSchema)` | 模块级校验器 |
 
 #### 异常体系
 
@@ -434,7 +434,7 @@ ResultExtractionError
 ├── ResultExtractionConfigurationError   # 流 / limits / hooks 非法
 ├── ResultExtractionArchiveError         # ZIP 或成员结构 / 读取失败
 ├── ResultExtractionManifestError        # manifest 缺失 / 多份 / JSON 结构错误
-├── ResultExtractionValidationError      # JSON 合法但不符合 DocumentSchema
+├── ResultExtractionValidationError      # JSON 合法但不符合 DocumentContentSchema
 └── ResultExtractionLimitError           # 解压后大小 / 数量超限
 ```
 
@@ -488,7 +488,7 @@ def extract_result(
 
 1. **完整性**：只有 manifest 校验与全部图片读取成功后才返回；任何失败都不返回部分结果。
 2. **独立性**：每次返回新的 dict、list 与 Pydantic 对象；不缓存、不共享。
-3. **页面**：`pages` 是 `DocumentSchema`，保持 manifest 中的页顺序；Pydantic 模型可被调用方继续使用或 `model_dump()`。
+3. **页面**：`pages` 是 `DocumentContentSchema`，保持 manifest 中的页顺序；Pydantic 模型可被调用方继续使用或 `model_dump()`。
 4. **图片**：`images` 按 canonical path 升序；`bytes` 精确且不可变；`path` 是归档相对路径，不是磁盘绝对路径。
 5. **无交叉校验**：不保证 `image_source.path` 都能在 `images` 中找到。
 6. **无重试**：解析失败是终态；调用方可重新下载后再次调用。
@@ -518,7 +518,7 @@ _IMAGES_DIRNAME = "images"
 _MAX_ISSUES_IN_ERROR = 20
 _MAX_CANDIDATES_IN_ERROR = 20
 _MAX_CONTEXT_CHARS = 512
-_SCHEMA = TypeAdapter(DocumentSchema)
+_SCHEMA = TypeAdapter(DocumentContentSchema)
 
 
 def extract_result(
@@ -534,7 +534,7 @@ def extract_result(
 
     start_pos: int | None = None
     manifest_path: str | None = None
-    pages: DocumentSchema = []
+    pages: DocumentContentSchema = []
     images: list[ExtractedImage] = []
 
     try:
@@ -1069,7 +1069,7 @@ def _read_member(
 4. 发现唯一 manifest（仅扫描成员名，不读数据）
 5. 有界读取 manifest
 6. UTF-8（去可选 BOM）解码
-7. json_invalid / RecursionError 分类；否则 TypeAdapter[DocumentSchema]
+7. json_invalid / RecursionError 分类；否则 TypeAdapter[DocumentContentSchema]
 8. 计算图片根目录；过滤、去重、排序
 9. 数量与声明总字节预检
 10. 逐张有界读取，累计实际总字节
@@ -1081,7 +1081,7 @@ def _read_member(
 ```python
 from pydantic import ValidationError
 
-def _validate_manifest(raw: bytes, path: str) -> DocumentSchema:
+def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -1167,7 +1167,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentSchema:
 | Manifest 解码 | 非法 UTF-8 | `ResultExtractionManifestError(reason="invalid_encoding")` |
 | Manifest 解析 | 非法 JSON | `ResultExtractionManifestError(reason="invalid_json")` |
 | Manifest 解析 | 嵌套过深 | `ResultExtractionManifestError(reason="too_deep")` |
-| Schema | 不符合 `DocumentSchema` | `ResultExtractionValidationError` |
+| Schema | 不符合 `DocumentContentSchema` | `ResultExtractionValidationError` |
 | 图片发现 | canonical path 重复 | `ResultExtractionArchiveError(reason="duplicate_member")` |
 | 图片发现 | 不安全路径 / 符号链接 | `ResultExtractionArchiveError(reason="unsafe_member")` |
 | 图片读取 | 加密 / 不支持压缩 / 损坏 / I/O | `ResultExtractionArchiveError(reason=...)` |
@@ -1206,7 +1206,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentSchema:
 | `config_error` | stream / limits / hooks 非法（`Telemetry` 构造后） |
 | `archive_error` | ZIP 结构、路径安全、重复成员、成员读取失败 |
 | `manifest_error` | manifest 缺失 / 多份 / 编码 / JSON / 嵌套深度 |
-| `validation_error` | JSON 合法但不符合 `DocumentSchema` |
+| `validation_error` | JSON 合法但不符合 `DocumentContentSchema` |
 | `limit_error` | manifest / 图片大小或数量超限 |
 | `unexpected` | 未知非 `ResultExtractionError` 异常 |
 
@@ -1299,7 +1299,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentSchema:
 
 * [ ] **Phase 3: JSON 与 Schema 校验**
 * [ ] 实现 UTF-8 + 可选 BOM 解码
-* [ ] 接入模块级 `TypeAdapter(DocumentSchema)`，分类 `json_invalid` 与 `RecursionError`
+* [ ] 接入模块级 `TypeAdapter(DocumentContentSchema)`，分类 `json_invalid` 与 `RecursionError`
 * [ ] 清洗 Pydantic 错误（`loc` / `type` / `msg`，最多 20 条，`from None`）
 * [ ] 确认返回的是 Pydantic 模型实例，且不调用 `model_dump()`
 

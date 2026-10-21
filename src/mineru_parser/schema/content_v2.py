@@ -195,4 +195,4 @@ LayoutElement = Annotated[
 Page = list[LayoutElement]
 
 # 整个文档（多页列表）
-DocumentSchema = list[Page]
+DocumentContentSchema = list[Page]
