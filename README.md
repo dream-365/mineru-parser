@@ -1,41 +1,87 @@
 # mineru-parser
 
-`mineru-parser` 把 MinerU 的异步文档解析流程封装成一次同步 Python 调用：**输入一个 PDF URI，输出一个 `ExtractedResult`**——包含逐页版面结构与图片字节的解析产物。
+`mineru-parser` 把 MinerU 的异步文档解析流程封装成一次同步 Python 调用：**输入一个 PDF URI，输出一个 `ParseResult`**——包含解析产物、任务元数据与失败原因的状态信封。
 
-一次调用跨越三个互相独立的阶段，每个阶段都可单独替换：
+一次调用跨越四个阶段，阶段顺序、参数透传、资源生命周期与端到端预算全部由库负责：
 
-| 阶段 | 模块 | 输入 | 输出 |
+| 阶段 | 内部实现 | 输入 | 输出 |
 | --- | --- | --- | --- |
-| ① 提交并等待 | [`client`](#1-client--mineruapiclient--asyncresult) | PDF URI | `MinerUTaskResult`（含 `zip_url`） |
-| ② 拉取结果包 | [`downloader`](#2-downloader--resultdownloader) | `zip_url` | `io.BytesIO`（ZIP 内存流） |
-| ③ 解析结果包 | [`extractor`](#3-extractor--extract_result) | ZIP 内存流 | `ExtractedResult`（`{pages, images}`） |
+| ① 提交 | client | PDF URI | `task_id` |
+| ② 等待 | client | `task_id` | `zip_url` |
+| ③ 下载 | downloader | `zip_url` | `io.BytesIO`（ZIP 内存流） |
+| ④ 解析 | extractor | ZIP 内存流 | `ExtractedResult`（`{pages, images}`） |
 
-适合后端服务、批处理脚本和离线文档处理等需要"提交 → 等待 → 取结果"的场景。
+> **📌 文档状态**：本页描述的是 [SPEC-004](docs/specs/SPEC-004-pipeline.md) 定义的**目标公共面**（唯一入口 `parse`）。该 Spec 目前处于 **In Review**、**尚未实现**；当前发布版（0.1.0）的顶层 API 仍是三组件（`MinerUApiClient` / `ResultDownloader` / `extract_result`），用法见 [迁移](#迁移)。实现落地后本页即为唯一入口文档，顶层三组件将**不再提供**（破坏性变更）。
 
 ## 快速开始
 
 ```python
-from mineru_parser import MinerUApiClient, ResultDownloader, extract_result
+from mineru_parser import parse
 
-with MinerUApiClient() as client, ResultDownloader() as downloader:  # API Key 默认读取 MINERU_API_KEY
-    # ① 提交任务，立即拿到可等待的结果句柄
-    task = client.submit("https://example.com/paper.pdf", data_id="doc-42")
-    result = task.wait(timeout=600, on_update=lambda s: print(s.state))
+# API Key 默认读取环境变量 MINERU_API_KEY
+result = parse("https://example.com/paper.pdf")   # 同步阻塞，直到任务终态
 
-    # ② 把结果包流式读进内存
-    stream = downloader.resolve(result.zip_url)  # io.BytesIO，游标位于 0
-
-    # ③ 解析结果包
-    extracted = extract_result(stream)
-
-for page in extracted["pages"]:      # list[Page]：逐页版面元素
-    for block in page:
-        print(block.type, block.bbox)
-for image in extracted["images"]:     # list[{"path", "bytes"}]
-    print(image["path"], len(image["bytes"]))
+if result["status"] == "success":
+    for page in result["data"]["pages"]:        # list[Page]：逐页版面元素
+        for block in page:
+            print(block.type, block.bbox)
+    for image in result["data"]["images"]:       # list[{"path", "bytes"}]
+        print(image["path"], len(image["bytes"]))
+    print(result["task_id"], result["data_id"])
+else:
+    err = result["error"]
+    print(err["stage"], err["error_type"], err["message"])
 ```
 
-`ExtractedResult` 的形状：
+`parse()` 是**同步阻塞**调用，一次调用完成"提交 → 等待 → 下载 → 解析"。任一阶段失败都不会交出半成品：失败时 `data` 必定是 `None`。
+
+### `parse()` 参数
+
+```python
+def parse(
+    uri: str,                                       # 必填：PDF 的绝对 http(s) URI
+    *,
+    model_version: str = "vlm",                     # 透传给 MinerU
+    data_id: str | None = None,                     # 对账标识（不是幂等键）
+    timeout: float | None = None,                   # 端到端相对预算（秒）
+    deadline_epoch: float | None = None,            # 端到端绝对截止（Unix 时间戳）
+    limits: ExtractionLimits | None = None,         # 解压侧限额
+    raise_on_error: bool = False,                   # True：失败时抛异常（见「失败语义」）
+    on_update: Callable[[MinerUTaskStatus], None] | None = None,
+    on_error: Callable[[PipelineStage, BaseException], None] | None = None,
+    on_metric: MetricHook | None = None,
+    correlation_id: str | None = None,              # 透传到全部日志与指标
+) -> ParseResult: ...
+```
+
+`timeout` 与 `deadline_epoch` **互斥**，同时给出会在任何网络请求之前失败。两者都不给表示**不设端到端上限**（等待阶段沿用客户端的无限等待语义）。
+
+| 参数 | 作用 | 详见 |
+| --- | --- | --- |
+| `model_version` | 透传给 MinerU 的模型版本 | — |
+| `data_id` | 对账标识；**不是幂等键** | [风险与已知限制](#风险与已知限制) |
+| `timeout` / `deadline_epoch` | 覆盖四个阶段的端到端预算 | [端到端预算与超时](#端到端预算与超时) |
+| `limits` | 解压侧限额（`ExtractionLimits`） | [内存预算与并发度](#内存预算与并发度) |
+| `raise_on_error` | `True` 时失败抛异常 | [失败语义](#失败语义默认信封异常可选) |
+| `on_update` | 任务状态 / 进度变化时触发 | — |
+| `on_error` | 阶段失败时收到 `(stage, 原始异常)` | [阶段归因](#阶段归因pipelinestage) |
+| `on_metric` | 指标回调 | [可观测性](#可观测性) |
+| `correlation_id` | 透传到全部日志与指标 | [可观测性](#可观测性) |
+
+## 返回值：`ParseResult`
+
+`ParseResult` 是普通 `dict`，**恰好**六个键：
+
+| 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `status` | `Literal["success", "failed"]` | 本次调用的结果状态 |
+| `data` | `ExtractedResult \| None` | 成功时为解析产物；**失败时必须为 `None`**（不返回部分产物） |
+| `task_id` | `str \| None` | 本次任务的服务端 id |
+| `data_id` | `str \| None` | 对账标识；服务端与提交参数都缺失时为 `None` |
+| `zip_url` | `str \| None` | 结果包地址（**敏感值**，见下） |
+| `error` | `ErrorMessage \| None` | 失败原因；**成功时必须为 `None`** |
+
+`data` 的形状就是 `ExtractedResult`——与结果包提取器的返回值逐字相同：
 
 ```python
 {
@@ -47,7 +93,280 @@ for image in extracted["images"]:     # list[{"path", "bytes"}]
 - **`pages`** — 按页分组的版面元素列表。元素按 `type` 判别：`title` / `paragraph` / `table` / `image` / `equation_interline` / `chart` / `list` / `algorithm` 以及页眉页脚等页级元素。
 - **`images`** — 结果包内顶层 `images/` 下的图片原始字节，按 canonical path 字典序排列。
 
-## 数据管道
+**元数据来源**：`task_id` / `data_id` / `zip_url` 取自本次调用的终态结果（`MinerUTaskResult`），失败时按"**当时已知**"填充——提交成功即知 `task_id`，等待完成后才知 `zip_url`，未知的取 `None`。
+
+> **⚠️ `zip_url` 是敏感值**：它可能携带签名凭据。库不会把它写入任何日志或指标标签，但也**不会**对其脱敏——落盘或打日志前请自行评估。
+
+## 失败语义：默认信封，异常可选
+
+**默认不抛异常。** 已知失败（`MinerUParserError` 家族）被封装成 `ErrorMessage` 随 `status="failed"` 返回，调用方默认无需 `try` / `except` 就能拿到成败与失败原因。
+
+```python
+result = parse("https://example.com/paper.pdf")
+
+if result["status"] == "failed":
+    error = result["error"]
+    error["stage"]        # PipelineStage：失败发生在哪个阶段
+    error["error_type"]   # 异常类名，如 "MinerUQuotaError"
+    error["message"]      # 脱敏后的可读摘要
+    error["cause_type"]   # 异常链首因的类名，无异常链时为 None
+```
+
+需要"按异常类型分支"时，显式开启异常模式：
+
+```python
+from mineru_parser import MinerUParserError, parse
+
+try:
+    result = parse("https://example.com/paper.pdf", timeout=600, raise_on_error=True)
+except MinerUParserError as exc:
+    # 已知失败：组件异常**原样抛出**（同一对象，类型与异常链不变）
+    print(type(exc).__name__, exc)
+```
+
+### 已知 vs 兜不住
+
+| 类别 | 判定 | 两种模式下的表现 |
+| --- | --- | --- |
+| **已知** | `MinerUParserError` 家族的任意子类（`MinerUError` / `ResultDownloadError` / `ResultExtractionError` / `PipelineError`） | 信封模式：封装成 `ErrorMessage`；异常模式：**原样抛出**（仅超时被翻译为 `PipelineTimeoutError`） |
+| **兜不住** | 未知异常类型、`MemoryError`、`KeyboardInterrupt`、`SystemExit` | **两种模式都原样抛出**，不封装、不吞掉 |
+
+判定只看**类型**，不看消息、不看内容。信封由库自行构造，可序列化、可落盘、可上报：它只带类名与脱敏摘要，**不携带原始异常对象**，也不携带文档正文、凭据或签名 URL。
+
+> **组件异常类已私有化**，调用方无法再按具体类型导入它们（`MinerUQuotaError` 等）。异常模式下用库级根异常 `MinerUParserError` 捕获，再按 `type(exc).__name__` 分支；信封模式下直接读 `error["error_type"]`。两种模式的信息量一致。
+
+### 两种模式的对照
+
+| 情形 | 信封（默认） | 异常（`raise_on_error=True`） |
+| --- | --- | --- |
+| 提交失败（认证 / 额度 / 服务端错误） | `status="failed"`，`error.stage="submit"`，`error.error_type="MinerUQuotaError"` 等 | 原样抛出 `MinerUQuotaError` |
+| 等待阶段超时 | `error.stage="wait"`，`error.error_type="PipelineTimeoutError"`，`error.cause_type="MinerUTimeoutError"` | `PipelineTimeoutError(stage="wait")`，`__cause__` 指向原始超时异常 |
+| 下载被 SSRF 防护拒绝 | `error.stage="download"`，`error.error_type="ResultDownloadSecurityError"` | 原样抛出 `ResultDownloadSecurityError` |
+| 结果包解压后超限 | `error.stage="extract"`，`error.error_type="ResultExtractionLimitError"` | 原样抛出 `ResultExtractionLimitError` |
+| 参数非法（`timeout` 与 `deadline_epoch` 同时给出） | `error.stage="config"` | `PipelineConfigurationError(field="timeout")` |
+| 未知异常 / `MemoryError` | **原样抛出** | **原样抛出** |
+
+## 阶段归因：`PipelineStage`
+
+失败发生在哪一段，以封闭枚举暴露——它是指标标签与 `on_error` 参数的唯一取值来源，低基数，可直接用于监控维度。
+
+| 取值 | 含义 |
+| --- | --- |
+| `config` | 任何阶段开始前的参数校验（尚未进入任何执行阶段） |
+| `submit` | 提交解析任务（`POST /extract/task`） |
+| `wait` | 轮询等待任务终态 |
+| `download` | 下载结果包 |
+| `extract` | 解析结果包 |
+
+```python
+import logging
+
+from mineru_parser import PipelineStage, parse
+
+logger = logging.getLogger(__name__)
+
+def on_failure(stage: PipelineStage, exc: BaseException) -> None:
+    logger.error("parse failed at %s: %s", stage, type(exc).__name__)
+
+result = parse(
+    "https://example.com/paper.pdf",
+    data_id="doc-42",
+    timeout=600,                              # 覆盖提交 / 等待 / 下载 / 解析四段
+    on_update=lambda status: print(status.state),
+    on_error=on_failure,
+)
+```
+
+阶段信息同时进入日志（`mineru.pipeline.error`，含 `stage` 与 `error_type`）与指标（`mineru.pipeline.total{stage}`），不提供回调时也能读到。回调抛出的异常会被吞掉并记一条告警，不影响主流程。
+
+## 端到端预算与超时
+
+`timeout`（相对秒数）与 `deadline_epoch`（绝对 Unix 时间戳）提供**单一**端到端预算，覆盖全部四个阶段，而不是三段超时之和。
+
+```python
+result = parse(uri, timeout=600)          # 相对预算
+result = parse(uri, deadline_epoch=1789000000.0)   # 绝对截止
+```
+
+预算在每个阶段**开始前**与**结束后**检查：
+
+| 检查点 | 耗尽时的 `stage` |
+| --- | --- |
+| 提交前 | `submit` |
+| 等待前 | `wait` |
+| 下载前 | `download` |
+| 解析前 | `extract` |
+| 解析后 | `extract` |
+
+等待阶段把**剩余预算**下传给客户端（`wait(timeout=remaining)`），客户端会在每次查询前与每次 sleep 后自行检查。
+
+**超时的统一语义**：`parse()` 抛出的超时只有一种类型——`PipelineTimeoutError`，携带 `stage`（耗尽时所处阶段）、`task_id`，以及等待阶段超时才有的 `last_status`（最后一次已知任务状态）；被翻译的原始超时异常保留在 `__cause__` 上。
+
+```python
+from mineru_parser import MinerUParserError, PipelineTimeoutError, parse
+
+try:
+    result = parse(uri, timeout=600, raise_on_error=True)
+except PipelineTimeoutError as exc:
+    print(exc.stage, exc.task_id)       # 例如 "wait"、任务 id
+except MinerUParserError as exc:
+    print(type(exc).__name__)           # 其余已知失败
+```
+
+> **⚠️ 已知限制**：除等待阶段外，管道**无法中断**正在进行的下载——若下载阶段越过端到端预算，只能在阶段结束后检出并失败（`stage="download"`）。提取阶段同理：它是纯 CPU / 内存操作，预算只能在提取**结束后**检出，此时结果会被丢弃。
+
+## 内存预算与并发度
+
+一次 `parse()` 的峰值内存由**压缩侧**（下载的 ZIP 缓冲，默认 50 MiB）与**解压侧**（提取限额，默认 160 + 32 + 40 + 8 MiB）共同决定：
+
+$$M_{\text{peak}} \approx 50 + 160 + 32 \times 2 + 40 + 8 = 290\,\text{MiB}$$
+
+部署侧应满足 $W \times M_{\text{peak}} \le M_{\text{container}}$（$W$ 为并发数）：
+
+| 形态 | 校验 |
+| --- | --- |
+| $W = 3$、容器 1 GiB | $3 \times 290 = 870\,\text{MiB} \le 1024\,\text{MiB}$ ✓ 默认档位可用 |
+| $W = 4$、容器 1 GiB | $4 \times 290 = 1160\,\text{MiB} > 1024\,\text{MiB}$ ✗ 默认档位**超限** |
+
+并发 4 时需要把解压侧上限压到 $X \le 126\,\text{MiB}$：
+
+```python
+from mineru_parser import ExtractionLimits, parse
+
+result = parse(
+    uri,
+    limits=ExtractionLimits(max_total_image_bytes=126 * 1024 * 1024),
+)
+```
+
+> 压缩侧与解压侧**不是同一量纲**：下载上限约束**压缩后**字节，提取限额约束**解压后**字节。因此"下载成功但提取被限额拒绝"是正常可达状态，不是错误。
+>
+> 峰值数字是**推导值**，不是实测值；真实并发峰值请在目标环境标定（推导口径见 SPEC-004 §3.5）。
+
+## 迁移
+
+顶层 API 面从"约 40 个导出名"收敛为"**一个函数 + 必要类型**"。这是**有意的破坏性变更**（项目尚未到 1.0，一次性收敛优于分阶段弃用）。
+
+| 名称 | 现状 | 迁移后 | 迁移方式 |
+| --- | --- | --- | --- |
+| — | — | ✅ `mineru_parser.parse`（**唯一稳定函数**） | 直接使用 |
+| `MinerUApiClient` / `AsyncResult` | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入；如需编排请使用 `parse` |
+| `ResultDownloader` | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入 |
+| `extract_result` / `canonicalize_member_path` | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入 |
+| 三族具体异常类 | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入；改用 `MinerUParserError` + 类名分支 |
+| `MinerUParserError` | 顶层导出 | **保留**（捕获全库失败所需） | 无需改动 |
+| `ExtractedResult` / `ExtractedImage` / `ExtractionLimits` / `MetricHook` / `MinerUTaskStatus` | 顶层导出 | **保留**（`parse` 签名 / 返回值所需类型） | 无需改动 |
+| `PipelineStage` / `ParseResult` / `ErrorMessage` | — | **保留**（新增） | — |
+| `PipelineError` / `PipelineTimeoutError` / `PipelineConfigurationError` | — | **保留**（新增：管道自身的两类失败） | — |
+
+三个组件的实现包改名为私有的 `mineru_parser._client` / `_downloader` / `_extractor`，公开路径 `mineru_parser.client` / `.downloader` / `.extractor` **不再提供**。组件的**行为契约**（SPEC-001 / 002 / 003）仍然成立——它们作为内部实现继续被实现与测试，只是不再对调用方可见；`parse()` 的语义是这些契约在管道层的投影。
+
+**迁移示例**：
+
+```python
+# 旧：三段手写编排
+from mineru_parser import MinerUApiClient, ResultDownloader, extract_result
+
+with MinerUApiClient() as client, ResultDownloader() as downloader:  # API Key 默认读取 MINERU_API_KEY
+    task = client.submit("https://example.com/paper.pdf", data_id="doc-42")
+    result = task.wait(timeout=600, on_update=lambda s: print(s.state))
+    stream = downloader.resolve(result.zip_url)   # io.BytesIO，游标位于 0
+    extracted = extract_result(stream)
+```
+
+```python
+# 新：一次调用
+from mineru_parser import parse
+
+result = parse(
+    "https://example.com/paper.pdf",
+    data_id="doc-42",
+    timeout=600,
+    on_update=lambda s: print(s.state),
+)
+```
+
+调用方不再负责：阶段顺序、流与组件的关闭、失败阶段的归因、三段超时的一致性。
+
+## 错误模型
+
+四条失败路径互不继承；需要"一网打尽"时用库级根异常 `MinerUParserError`。
+
+其中**管道家族**（`PipelineError` 及其两个子类）可以从顶层导入并单独捕获；**组件三族**是内部实现，调用方无法按具体类型导入，只通过 `MinerUParserError` 捕获后按类名分支（信封模式下读 `error["error_type"]`）。
+
+```mermaid
+flowchart TB
+    ROOT["MinerUParserError<br/>（库级根异常）"]:::root
+    CLIENT["MinerUError"]:::c1
+    DLERR["ResultDownloadError"]:::c2
+    EXERR["ResultExtractionError"]:::c3
+    PIPE["PipelineError"]:::c4
+
+    ROOT --> CLIENT
+    ROOT --> DLERR
+    ROOT --> EXERR
+    ROOT --> PIPE
+
+    CLIENT --> EXEC["MinerUExecutionError<br/>（终态失败）"]:::leaf
+    EXEC --> A1["MinerUAuthenticationError<br/>MinerUQuotaError<br/>MinerUConfigurationError"]:::leaf
+    CLIENT --> A2["MinerUTransientError<br/>MinerUTimeoutError"]:::leaf
+
+    DLERR --> B1["ResultDownloadSecurityError<br/>ResultDownloadTooLargeError<br/>ResultDownloadContentTypeError<br/>ResultDownloadHTTPError<br/>ResultDownloadTimeoutError / TransientError<br/>ResultDownloadConfigurationError"]:::leaf
+
+    EXERR --> C1["ResultExtractionConfigurationError<br/>ResultExtractionArchiveError<br/>ResultExtractionManifestError<br/>ResultExtractionValidationError<br/>ResultExtractionLimitError"]:::leaf
+
+    PIPE --> D1["PipelineConfigurationError<br/>（参数 / 配置非法）"]:::leaf
+    PIPE --> D2["PipelineTimeoutError<br/>（端到端预算耗尽）"]:::leaf
+
+    classDef root fill:#eceff1,stroke:#546e7a,stroke-width:2px,color:#263238;
+    classDef c1 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1;
+    classDef c2 fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#bf360c;
+    classDef c3 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
+    classDef c4 fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef leaf fill:#ffffff,stroke:#90a4ae,stroke-width:1px,color:#37474f;
+```
+
+- **client**：`MinerUTransientError` 表示请求确定未发出或只读查询失败，可以安全重试；`MinerUExecutionError` 表示结果未知、请求被拒绝或服务端明确失败。认证、额度、配置错误均继承 `MinerUExecutionError`。
+- **downloader**：安全、超限、内容类型、HTTP 状态、超时与重试耗尽各有独立异常类型，公共消息不泄漏原始签名 URL。
+- **extractor**：按 `reason` / `resource` / `category` 字段分支，公共消息只使用英文固定文案，不携带 manifest 正文或图片字节。
+- **pipeline**：只有两类自身失败——`PipelineConfigurationError`（参数非法，带 `field`）与 `PipelineTimeoutError`（预算耗尽，带 `stage`）。
+
+## 可观测性
+
+`parse()` 接受 `on_metric` 指标回调与 `correlation_id` 关联标识，统一走 `mineru_parser` logger。指标回调失败只记一条告警日志，不影响主流程。
+
+```python
+def on_metric(name: str, value: float, tags: dict[str, str]) -> None:
+    print(name, value, tags)
+
+result = parse(uri, on_metric=on_metric, correlation_id="doc-42")
+```
+
+管道自身的指标：
+
+| 指标 | 标签 |
+| --- | --- |
+| `mineru.pipeline.total` | `outcome`、`stage` |
+| `mineru.pipeline.duration_ms` | `outcome` |
+| `mineru.pipeline.stage.duration_ms` | `stage`、`outcome` |
+| `mineru.pipeline.pages` / `.images` / `.image_bytes` | `outcome` |
+
+`outcome` 是封闭枚举：`success` / `config_error` / `timeout` / `stage_error` / `unexpected`。指标标签只允许封闭枚举——**不得**包含 URI、`task_id`、`data_id`、`zip_url`、路径或 `correlation_id`（这些只出现在日志字段里）。
+
+日志名：`mineru.pipeline`（成功）、`mineru.pipeline.stage`（阶段切换）、`mineru.pipeline.error`（失败，含 `stage` 与 `error_type`）、`mineru.pipeline.on_error.failed`（回调异常）。三个组件的既有日志名保持不变。
+
+## 风险与已知限制
+
+- **`data_id` 不是幂等键**：它是**对账标识**，服务端不提供"按 `data_id` 复用任务"的能力。同一 URI 调用两次 `parse()` 会创建**两个任务、计费两次**。需要去重请在业务层自行处理。
+- **默认没有端到端超时**：不传 `timeout` / `deadline_epoch` 时等待阶段无上界，长文档解析可能耗时数分钟。生产环境建议显式给出预算。
+- **管道无状态，崩溃后任务不可恢复**：等待途中进程崩溃会留下一个无人认领的服务端任务（可能计费）。库不提供凭 `task_id` 恢复等待的入口，请按 `data_id` 自行对账。
+- **每次调用自建 Session**：`parse()` 每次调用都新建 client / downloader 及其连接池，跨调用无连接池复用。高频小任务场景下 TLS 握手开销显著。
+- **`zip_url` 是敏感值**：库不记录它，但也不脱敏；落盘或打日志前请自行评估。
+- **峰值内存是推导值**：290 MiB 来自组件默认值的推导，真实并发峰值需在目标环境标定。
+
+## 内部实现（不对外）
+
+以下三个组件是 `parse()` 的内部实现，**不提供公开导入路径**，也不遵循 SemVer——它们的行为契约由各自 SPEC 约束（SPEC-001 / 002 / 003），但对调用方而言，`parse()` 就是全部。
 
 ```mermaid
 flowchart LR
@@ -63,7 +382,7 @@ flowchart LR
     DL["downloader<br/>ResultDownloader"]:::mod
     MEM["io.BytesIO<br/>ZIP 内存流"]:::io
     EX["extractor<br/>extract_result"]:::mod
-    RESULT["ExtractedResult<br/>{pages, images}"]:::out
+    RESULT["ParseResult<br/>{status, data, task_id, data_id, zip_url, error}"]:::out
 
     URI -->|"① 提交"| CLIENT
     CLIENT -->|"POST /extract/task"| API
@@ -76,267 +395,8 @@ flowchart LR
     EX --> RESULT
 ```
 
-### 流程说明
-
-**① client：提交 → 等待。** `submit(uri)` 把 PDF URI 交给 MinerU，返回一个 `AsyncResult` 句柄；`wait()` 阻塞轮询直到任务进入终态，成功时返回 `MinerUTaskResult`，其中的 `zip_url` 指向结果包。客户端自身不保存任务状态，因此进程重启后可用 `resume(task_id)` 接着等待，不会重复提交任务。
-
-**② downloader：拉取结果包。** `resolve(zip_url)` 把结果包流式读进内存，返回游标位于 0 的 `io.BytesIO`。只有完整读取并关闭响应后才返回，任何失败都不会交出半截数据；默认限制单次响应体 50 MiB、总耗时 300 秒，并拒绝非公网目标与 HTTPS 降级重定向。
-
-**③ extractor：解析结果包。** `extract_result(stream)` 从 ZIP 内存流中定位唯一的顶层 `*_content_list_v2.json`，用 `DocumentContentSchema` 做 Schema 校验，收集顶层 `images/` 下的图片，输出 `{"pages", "images"}`。全程不落盘、不解码图片、不关闭调用方流。
-
-三个阶段各自抛出互不继承的异常（见[错误模型](#错误模型)），任何一段失败都不会留下半成品状态。
-
-## 核心模块
-
-### 1. client — `MinerUApiClient` / `AsyncResult`
-
-同步客户端，负责配置、凭证与结果句柄工厂。
-
-```python
-from mineru_parser import MinerUApiClient
-
-with MinerUApiClient() as client:  # API Key 默认读取 MINERU_API_KEY
-    # 提交解析任务，立即拿到可等待的结果句柄
-    submission = client.submit("https://example.com/paper.pdf", data_id="doc-42")
-    result = submission.wait(timeout=600, on_update=lambda s: print(s.state))
-    print(result.zip_url)
-
-    # 进程重启后：从持久化的 task_id 恢复等待，不会重复提交
-    resumed = client.resume(submission.task_id)
-    result = resumed.wait(timeout=600)
-```
-
-主要能力：
-
-- **提交并等待**：`submit()` 返回 `AsyncResult`，由句柄的 `wait()` 完成等待；也可以先提交、稍后再等待；
-- **任务恢复**：持久化 `task_id` 后，可在之后的进程里通过 `resume()` 恢复等待，不会重复提交任务；
-- **稳健轮询**：自动处理指数退避、随机抖动、服务端 `Retry-After` 与连续错误上限，偶发故障不会立即中断；
-- **等待边界**：支持相对超时 `timeout` 和绝对截止时间 `deadline_epoch`（两者互斥），超时异常携带最后已知的任务状态；
-- **进度回调**：`on_update` 在状态或解析页数变化时触发，便于上报进度；
-- **错误分类**：认证、额度、瞬时、执行与超时错误分别抛出，便于调用方决定重试策略；
-- **共享连接池**：客户端可跨任务复用，自建并管理 `requests.Session`；也可注入外部 Session，此时生命周期归调用方负责，`close()` 不会关闭它。
-
-`AsyncResult` 负责解释终态：成功后返回 `MinerUTaskResult`（`zip_url` / `provider_task_id` / `data_id`），失败或取消抛 `MinerUExecutionError`，超时抛 `MinerUTimeoutError`。终态一旦观察到就不再访问网络，重复调用 `wait()` 直接返回缓存结果或抛出同一类异常。句柄不是线程安全的——多线程等待同一任务时，每个线程应各自通过 `client.resume(task_id)` 创建独立句柄。
-
-轮询节奏由 `PollPolicy` 决定（指数退避 + 抖动，`Retry-After` 优先，连续错误上限）：
-
-```python
-from mineru_parser import MinerUApiClient, PollPolicy
-
-policy = PollPolicy(initial_interval=3.0, max_interval=30.0, backoff=1.5, jitter=0.5)
-client = MinerUApiClient(poll_policy=policy)
-```
-
-客户端内部管道：
-
-```mermaid
-flowchart LR
-    %% 样式定义
-    classDef clientStyle fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1;
-    classDef taskStyle fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#01579b;
-    classDef pollStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
-    classDef depStyle fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#263238;
-    classDef dataStyle fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
-    classDef extStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#bf360c;
-    classDef serverStyle fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#880e4f;
-    classDef boundaryStyle fill:#ffffff,stroke:#90a4ae,stroke-width:1px,stroke-dasharray: 4 3,color:#546e7a;
-
-    %% 外部输入 / 输出
-    PDF["PDF File URL"]:::extStyle
-    CALLER["调用方 (Caller)"]:::extStyle
-    SERVER["MinerU API Server"]:::serverStyle
-
-    %% 核心管道：每个组件的实线节点写职责，虚线节点写边界
-    subgraph CORE["mineru-parser 核心管道"]
-        direction LR
-
-        subgraph CLIENTBOX["MinerUApiClient｜配置 + 任务工厂"]
-            direction TB
-            CLIENT["职责<br/>• 凭证 / base_url / timeout<br/>• Session 生命周期（连接池共享）<br/>• submit · resume · 内部状态查询<br/>• 按 PollPolicy 创建 Poller"]:::clientStyle
-            CLIENT_X["边界<br/>• 不保存任务状态<br/>• 不执行轮询 / 等待<br/>• 不解释任务终态<br/>• data_id 仅用于对账，不是幂等键"]:::boundaryStyle
-        end
-
-        subgraph TRANSPORTBOX["MinerUTransport｜wire 协议"]
-            direction TB
-            TRANSPORT["职责<br/>• HTTP 请求构造 / 响应解析<br/>• HTTP / 业务错误分类"]:::depStyle
-            TRANSPORT_X["边界<br/>• 不持有任务状态<br/>• 不做轮询<br/>• 不做任务终态解释"]:::boundaryStyle
-        end
-
-        subgraph TASKBOX["AsyncResult｜结果句柄"]
-            direction TB
-            TASK["职责<br/>• 持有 task_id / data_id<br/>• 缓存最近状态 / 终态结果<br/>• 解释终态：返回结果或抛异常<br/>• 终态后 wait() 不再访问网络"]:::taskStyle
-            TASK_X["边界<br/>• 不直接发 HTTP<br/>• 不决定轮询节奏<br/>• 非线程安全"]:::boundaryStyle
-        end
-
-        subgraph POLLBOX["Poller｜轮询节奏"]
-            direction TB
-            POLLER["职责<br/>• 退避 + 抖动 · Retry-After 优先<br/>• 连续错误上限<br/>• timeout / deadline<br/>• 状态 / 进度变化触发 on_update"]:::pollStyle
-            POLLER_X["边界<br/>• 不解释任务成败<br/>• 不管理任务状态"]:::boundaryStyle
-        end
-
-        STATUS["MinerUTaskStatus<br/>state · progress · full_zip_url"]:::dataStyle
-        RESULT["MinerUTaskResult<br/>zip_url · provider_task_id · data_id<br/>产物边界：仅提供 zip_url，不负责下载 / 解压"]:::dataStyle
-    end
-
-    %% 提交：Client 做配置与工厂，Transport 只讲 wire 协议
-    PDF -->|"uri"| CLIENT
-    CLIENT -- "submit / trace 委托" --> TRANSPORT
-    TRANSPORT -- "POST /extract/task<br/>GET /extract/task/{id}" --> SERVER
-    SERVER -- "task_id / 任务详情 JSON" --> TRANSPORT
-    TRANSPORT -- "task_id / ExtractionTaskDetail" --> CLIENT
-
-    %% 句柄：Client 只负责创建 / 恢复，不接管任务生命周期
-    CLIENT -- "构造并返回句柄" --> TASK
-    CLIENT -. "resume(task_id)：从持久化 id 恢复<br/>不发起网络请求" .-> TASK
-
-    %% 等待：AsyncResult 定义语义，Poller 只决定节奏
-    TASK -- "wait()：Poller.run(fetch = result.refresh)" --> POLLER
-    POLLER -- "循环 fetch()" --> TASK
-    TASK -- "refresh()：client._trace(task_id)（内部）" --> CLIENT
-    CLIENT -- "normalize_status()" --> STATUS
-    STATUS -- "写入 status 缓存" --> TASK
-
-    %% 终态：只有 Task 解释成败
-    TASK -- "succeeded" --> RESULT
-    TASK -. "failed / canceled → MinerUExecutionError<br/>timeout → MinerUTimeoutError" .-> CALLER
-    RESULT --> CALLER
-
-    %% 子图样式微调
-    style CORE fill:#fafafa,stroke:#b0bec5,stroke-width:1px,stroke-dasharray: 3 3
-    style CLIENTBOX fill:#f5f9ff,stroke:#90caf9,stroke-width:1px
-    style TRANSPORTBOX fill:#f7f9fa,stroke:#b0bec5,stroke-width:1px
-    style TASKBOX fill:#f1faff,stroke:#81d4fa,stroke-width:1px
-    style POLLBOX fill:#faf5fc,stroke:#ce93d8,stroke-width:1px
-```
-
-### 2. downloader — `ResultDownloader`
-
-同步下载器，把结果包 URL 流式读进内存。
-
-```python
-import zipfile
-
-from mineru_parser import ResultDownloader
-
-with ResultDownloader() as downloader:
-    stream = downloader.resolve(result.zip_url)  # io.BytesIO，游标位于 0
-    with zipfile.ZipFile(stream) as archive:
-        ...
-```
-
-主要能力：
-
-- **不交出半截数据**：只有完整读取并关闭响应后才返回 `BytesIO`；任何失败都直接抛异常；
-- **有界读取**：默认限制单次响应体 **50 MiB**、总耗时 **300 秒**（覆盖整个 `resolve()` 调用，含重试、重定向与退避）；
-- **SSRF 防护**：拒绝回环、私网、链路本地、多播、保留地址等非公网 IP，拒绝 HTTPS 降级重定向，逐跳校验重定向目标；
-- **统一重试**：`DownloadRetryPolicy`（默认 3 次尝试、指数退避 + 抖动、`Retry-After` 优先）是唯一重试层；
-- **URL 脱敏**：日志中的 URL 一律剔除 query 与 fragment，并移除控制字符，避免签名参数泄漏与日志注入。
-
-```python
-from mineru_parser import DownloadRetryPolicy, ResultDownloader
-
-downloader = ResultDownloader(
-    max_bytes=50 * 1024 * 1024,
-    total_timeout=300.0,
-    retry_policy=DownloadRetryPolicy(max_attempts=3, initial_interval=0.5, backoff=2.0),
-)
-```
-
-> **注入自定义 Session 时**：请将其内部重试次数设为 0（`DownloadRetryPolicy` 是唯一重试层），且不要携带全局 `Authorization` / `Cookie` 头或 `session.auth`。
-
-### 3. extractor — `extract_result`
-
-结果包提取器，把 ZIP 内存流解析为结构化的页面与图片。**不下载、不重试、不落盘、不解码图片**。
-
-```python
-import io
-
-from mineru_parser import canonicalize_member_path, extract_result
-
-stream = io.BytesIO(zip_bytes)  # 来源不限：下载器、缓存、本地文件或测试夹具
-extracted = extract_result(stream)
-
-pages = extracted["pages"]    # list[list[LayoutElement]]，Pydantic 模型
-images = extracted["images"]  # [{"path": "images/a.jpg", "bytes": b"..."}]
-
-# manifest 中的 image_source.path 是上游原始字符串，必须用同一套规则归一后再匹配
-by_path = {image["path"]: image for image in images}
-for page in pages:
-    for block in page:
-        source = getattr(block.content, "image_source", None)
-        if source is not None:
-            key = canonicalize_member_path(source.path)  # 可能返回 None
-            if key is not None and key in by_path:
-                ...
-```
-
-```mermaid
-flowchart LR
-    URL["结果包 URL"] --> DL["ResultDownloader.resolve<br/>→ io.BytesIO"]
-    DL --> EX["extract_result(stream)"]
-    EX --> S["DocumentContentSchema<br/>Pydantic 校验"]
-    EX --> OUT["{ pages, images }"]
-```
-
-契约要点：
-
-- 只在 ZIP **顶层**定位唯一的 `*_content_list_v2.json`；缺失或多份都失败关闭；
-- 只收集顶层 `images/` 下的常规文件；路径 canonical 化、按字典序排序、拒绝重复与不安全路径；
-- 解压后资源受 `ExtractionLimits` 限制：manifest 16 MiB、单图 32 MiB、图片总量 160 MiB、图片 10,000 张、ZIP 成员 100,000 个；
-- 不关闭调用方流，成功与失败后都会恢复游标；不落盘、不解码图片；
-- 失败按 `ResultExtractionError` 的五个子类分类（配置 / 归档 / manifest / Schema / 限额），可用 `reason` / `resource` / `category` 分支。
-
-```python
-from mineru_parser import ExtractionLimits, extract_result
-
-extracted = extract_result(stream, limits=ExtractionLimits(max_images=5_000))
-```
-
-**内存预算**：默认限额下单次调用峰值内存约 **240 MiB**；$W = 4$ 并发时约 **960 MiB**。若部署形态不同，请用 `ExtractionLimits` 覆盖 `max_total_image_bytes`（推导见 SPEC-003 §3.2）。
-
-## 错误模型
-
-三条失败路径互不继承，各自可单独捕获；需要"一网打尽"时用库级根异常 `MinerUParserError`。
-
-```mermaid
-flowchart TB
-    ROOT["MinerUParserError<br/>（库级根异常）"]:::root
-    CLIENT["MinerUError"]:::c1
-    DLERR["ResultDownloadError"]:::c2
-    EXERR["ResultExtractionError"]:::c3
-
-    ROOT --> CLIENT
-    ROOT --> DLERR
-    ROOT --> EXERR
-
-    CLIENT --> EXEC["MinerUExecutionError<br/>（终态失败）"]:::leaf
-    EXEC --> A1["MinerUAuthenticationError<br/>MinerUQuotaError<br/>MinerUConfigurationError"]:::leaf
-    CLIENT --> A2["MinerUTransientError<br/>MinerUTimeoutError"]:::leaf
-
-    DLERR --> B1["ResultDownloadSecurityError<br/>ResultDownloadTooLargeError<br/>ResultDownloadContentTypeError<br/>ResultDownloadHTTPError<br/>ResultDownloadTimeoutError / TransientError<br/>ResultDownloadConfigurationError"]:::leaf
-
-    EXERR --> C1["ResultExtractionConfigurationError<br/>ResultExtractionArchiveError<br/>ResultExtractionManifestError<br/>ResultExtractionValidationError<br/>ResultExtractionLimitError"]:::leaf
-
-    classDef root fill:#eceff1,stroke:#546e7a,stroke-width:2px,color:#263238;
-    classDef c1 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1;
-    classDef c2 fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#bf360c;
-    classDef c3 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
-    classDef leaf fill:#ffffff,stroke:#90a4ae,stroke-width:1px,color:#37474f;
-```
-
-- **client**：`MinerUTransientError` 表示请求确定未发出或只读查询失败，可以安全重试；`MinerUExecutionError` 表示结果未知、请求被拒绝或服务端明确失败。认证、额度、配置错误均继承 `MinerUExecutionError`，需要细分时先捕获更具体的类型。
-- **downloader**：安全、超限、内容类型、HTTP 状态、超时与重试耗尽各有独立异常类型，公共消息不泄漏原始签名 URL。
-- **extractor**：按 `reason` / `resource` / `category` 字段分支，公共消息只使用英文固定文案，不携带 manifest 正文或图片字节。
-
-## 可观测性
-
-三个模块都接受 `on_metric` 指标回调与 `correlation_id` 关联标识，统一走 `mineru_parser` logger。指标回调失败只记一条告警日志，不影响主流程。
-
-```python
-def on_metric(name: str, value: float, tags: dict[str, str]) -> None:
-    print(name, value, tags)
-
-client = MinerUApiClient(on_metric=on_metric, correlation_id="doc-42")
-```
-
-指标名：`mineru.submit.*`、`mineru.task.duration_ms`、`mineru.download.*`、`mineru.extract.*`。
+- **client** — 提交、轮询、终态解释。自动处理指数退避、随机抖动、服务端 `Retry-After` 与连续错误上限；错误按认证 / 额度 / 瞬时 / 执行 / 超时分类。
+- **downloader** — 流式下载。默认限制单次响应体 50 MiB、总耗时 300 秒，拒绝非公网目标与 HTTPS 降级重定向，日志中的 URL 剔除 query 与 fragment。
+- **extractor** — 解析结果包。只在 ZIP 顶层定位唯一的 `*_content_list_v2.json`，用 `DocumentContentSchema` 做 Schema 校验，收集顶层 `images/` 下的图片；解压后资源受 `ExtractionLimits` 限制（manifest 16 MiB、单图 32 MiB、图片总量 160 MiB、图片 10,000 张、ZIP 成员 100,000 个），不落盘、不解码图片。
+
+三者的组合效应由管道保证：阶段顺序由库固定，任一阶段失败即中止后续阶段（失败于 submit / wait 时不发起下载，失败于 download 时不调用提取器）；中间 ZIP 流与自建组件由管道在返回前按"流 → downloader → client"的顺序关闭，失败路径同样关闭。
