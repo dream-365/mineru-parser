@@ -16,7 +16,7 @@
 
 `ResultDownloader` 的职责边界止于把结果包 URL 读入 `io.BytesIO`（见 `SPEC-002`）。下游业务真正需要的是“页面 + 图片”：`content_list_v2.json` 中的版面块结构，以及 ZIP 内 `images/` 目录下的图片二进制。当前这一步通常由调用方直接拼 `zipfile.ZipFile`、`json.loads`、`model_validate` 与目录遍历完成，痛点集中在五个方面：
 
-1. **Manifest 定位不一致**：结果包内文件名依赖源文档名，可能位于 ZIP 根目录或子目录；同名/多份 manifest、macOS 资源分叉、错误页 ZIP 都会让“取第一个匹配文件”的脚本悄悄读到错误内容。
+1. **Manifest 定位不一致**：结果包内文件名依赖源文档名，约定位于 ZIP 顶层目录；子目录残留、同名/多份 manifest、macOS 资源分叉、错误页 ZIP 都会让“取第一个匹配文件”的脚本悄悄读到错误内容。
 2. **Schema 校验缺失**：直接用 `dict["content"]` 取值时，字段缺失、块类型漂移与 `bbox` 非法要等到业务深处才暴露；错误信息也缺少字段路径。
 3. **图片处理分散**：图片路径大小写、重复成员、`..` 路径、符号链接、缺失 `images/` 目录各自处理；排序不确定，调用方难以做稳定快照。
 4. **资源边界缺失**：下载器的 `max_bytes` 只约束 ZIP 的压缩字节数，不约束解压后的 manifest 与图片；压缩炸弹或超大图片仍可在解压阶段把进程内存打满。
@@ -72,16 +72,16 @@ flowchart LR
 | 可观测性 | ❌ | ❌ | ✅ 日志 / 指标统一出口 |
 | 无网络、内存 ZIP 测试 | ⚠️ | ⚠️ | ✅ 纯函数 |
 
-> **样本基线（2026-10-21）**：用一个最小真实结果包核对，ZIP 共 7 个成员：`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`。manifest 4,803 B，已用 `TypeAdapter(DocumentContentSchema)` 校验通过（1 页、6 个块：TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；ImageBlock 的 `image_source.path` 为 `images/<sha256>.jpg`，与图片成员路径一致；图片 1 张、13,936 B。该样本确认「根目录 manifest + 根 `images/`」布局与默认限额的宽松度，但样本量不足以校准 P95/P99，真实样本统计仍见 R-1。
+> **样本基线（2026-10-21）**：用一个最小真实结果包核对，ZIP 共 7 个成员：`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`。manifest 4,803 B，已用 `TypeAdapter(DocumentContentSchema)` 校验通过（1 页、6 个块：TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；ImageBlock 的 `image_source.path` 为 `images/<sha256>.jpg`，与图片成员路径一致；图片 1 张、13,936 B。该样本确认「根目录 manifest + 根 `images/`」布局与默认限额的宽松度，也确认了本期把 manifest 定位范围收敛到 ZIP 顶层目录（Goal 2）的依据；样本量不足以校准 P95/P99，真实样本统计仍见 R-1。
 >
 > **为什么不直接内联十几行代码？** 单个正常包确实只需要 `ZipFile` 加两次读取；本组件的价值在于把“定位唯一 manifest、Schema 校验、路径安全、解压后限额、错误分类、流生命周期”收敛成可测试的公共契约。实现预计约 300–500 行，主要成本在边界与测试，而不是解析本身。
 
 ### 1.3 目标 (Goals)
 
 - [ ] **Goal 1**：提供统一入口 `extract_result(stream) -> ExtractedResult`，接收可 seek 的二进制流，交付 `{"pages", "images"}`。
-- [ ] **Goal 2**：在 ZIP 内任意深度定位**唯一**的 `*_content_list_v2.json`；缺失或多份均失败关闭。
+- [ ] **Goal 2**：只在 ZIP **顶层目录**定位**唯一**的 `*_content_list_v2.json`；缺失或多份均失败关闭。
 - [ ] **Goal 3**：使用 `schema/content_v2.py` 的 `DocumentContentSchema` 完成 JSON 与 Schema 校验，错误携带字段路径且不泄漏正文。
-- [ ] **Goal 4**：提取 manifest 同级 `images/` 目录下的全部常规文件，交付 canonical path 与精确二进制内容，输出顺序确定。
+- [ ] **Goal 4**：提取 ZIP 顶层 `images/` 目录下的全部常规文件，交付 canonical path 与精确二进制内容，输出顺序确定。
 - [ ] **Goal 5**：对 manifest 与图片实施解压后字节数、图片数量上限，失败时不返回任何部分结果。
 - [ ] **Goal 6**：建立稳定的错误分类：配置、压缩包、manifest、Schema、限额。
 - [ ] **Goal 7**：明确流生命周期：不关闭调用方流，成功/失败后恢复游标。
@@ -93,7 +93,7 @@ flowchart LR
 
 > 明确本次迭代**不包含**的内容，防止需求范围膨胀（Scope Creep）。
 
-- [ ] 下载、重试、URL 校验、SSRF 防护；这些属于 `ResultDownloader`。
+- [ ] 下载、重试、URL 校验、SSRF 防护；这些属于上游下载组件，不在本组件范围内。
 - [ ] 解压到磁盘、临时文件、`extract()` / `extractall()`、ZIP 成员权限恢复。
 - [ ] 解析 `content_list.json`（v1）、`middle.json`、`model.json`、Markdown 或其他结果文件。
 - [ ] 图片解码、格式嗅探、缩略图、OCR、内容哈希或损坏图片检测。
@@ -104,23 +104,23 @@ flowchart LR
 - [ ] 阅读顺序重建、跨页合并、版面块重排。
 - [ ] ZIP 来源、签名、哈希校验；只校验结构与资源边界。
 - [ ] 非 seekable 流的缓冲；调用方需自行转为 `io.BytesIO`。
-- [ ] `ResultExtractor` 类门面或 `downloader.extract(result)` 便捷入口；调用方显式组合两个组件。
+- [ ] `ResultExtractor` 类门面，或与上游下载组件绑定的便捷入口；调用方显式组合两个组件。
 - [ ] 修改 `schema/content_v2.py` 或在 Extractor 层开启 `strict=True` / `extra="forbid"`。
 - [ ] JSON 重复键检测；解析器按“后值覆盖前值”处理。
 - [ ] 对损坏 ZIP 自动重试；本地解析错误是终态，调用方可重新下载后再次调用。
-- [ ] 任意 ZIP 成员访问 API；只读取 manifest 与同级 `images/` 下的文件。
+- [ ] 任意 ZIP 成员访问 API；只读取顶层 manifest 与顶层 `images/` 下的文件。
 
 ### 1.5 威胁模型 (Threat Model)
 
 | 维度 | 内容 |
 | :--- | :--- |
-| **输入来源** | 可能是 `ResultDownloader` 刚下载的结果包，也可能是调用方从其他途径获得的 ZIP；一律按不可信数据处理。 |
+| **输入来源** | 可能是上游交付的结果包，也可能是调用方从其他途径获得的 ZIP；一律按不可信数据处理。 |
 | **受保护资产** | 进程内存、下游磁盘（若调用方使用返回的 path 落盘）、下游图片渲染器与解析器。 |
 | **攻击者能力** | 控制成员名、成员数量、声明大小、压缩方法、加密标志、JSON 结构与图片字节；可构造重复成员、`..` 路径、超大解压结果、深层嵌套 JSON。 |
 | **主要控制** | 唯一 manifest、canonical path、拒绝不安全成员、仅内存读取、有界读取、解压后大小/数量上限、Pydantic Schema 校验、失败不返回部分结果。 |
 | **残余风险** | `zipfile` / `zlib` 的 CPU 放大与实现漏洞、Pydantic 模型内存放大、下游图片解码漏洞、manifest 与图片引用不一致、无法识别的符号链接。 |
 
-> 本 Spec 的安全承诺以“不落盘、只读取 manifest 与同级 `images/`、使用有界读取”为前提。调用方若把返回的 path 直接拼接到磁盘路径，仍需自行做目标目录约束；Extractor 的 canonical path 只是第一道防线。
+> 本 Spec 的安全承诺以“不落盘、只读取顶层 manifest 与顶层 `images/`、使用有界读取”为前提。调用方若把返回的 path 直接拼接到磁盘路径，仍需自行做目标目录约束；Extractor 的 canonical path 只是第一道防线。
 
 ---
 
@@ -129,12 +129,12 @@ flowchart LR
 ### US-1: 基本提取与结果契约
 
 **As a** 业务调用方
-**I want to** 把 `ResultDownloader` 返回的 ZIP 内存流直接交给一个函数
+**I want to** 把任意来源的 ZIP 内存流直接交给一个函数
 **So that** 我能拿到结构化页面与图片字节，而不关心 ZIP 与 JSON 细节
 
 #### 验收标准 (Acceptance Criteria)
 
-* **AC-1.1**: `extract_result(stream, *, limits=None, on_metric=None, correlation_id=None)` 必须接受 `io.BytesIO` 或任意可读、可 seek 的二进制流；不得依赖网络、磁盘或环境变量，不得写临时文件，不得调用 `stream.close()`。
+* **AC-1.1**: `extract_result(stream, *, limits=None, on_metric=None, correlation_id=None)` 必须接受 `io.BytesIO` 或任意可读、可 seek 的二进制流，内容为标准 ZIP 归档；输入字节的来源不受限（上游交付、缓存命中、本地文件、测试夹具均可），Extractor 不感知来源，也不参与下载或重试；不得依赖网络、磁盘或环境变量，不得写临时文件，不得调用 `stream.close()`。
 * **AC-1.2**: 成功时必须返回新的普通 `dict`，且恰好包含 `"pages"` 与 `"images"` 两个键。`pages` 必须是 `schema.content_v2.DocumentContentSchema` 校验后的对象（外层列表为页，内层列表为版面块，保持 manifest 中的顺序）；`images` 必须是 `{"path": str, "bytes": bytes}` 列表，并按 `path` 升序排序。
 * **AC-1.3**: `images[].bytes` 必须是不可变 `bytes` 对象，内容为 ZIP 成员解压后的精确字节；不得解码、转码或重新编码。`images[].path` 必须是使用 `/` 分隔的 canonical 归档相对路径。
 * **AC-1.4**: 每次调用必须返回全新对象，不得缓存或复用上一次结果；相同输入字节与相同 `limits` 必须产生等价结果。
@@ -155,14 +155,14 @@ flowchart LR
 
 #### 验收标准 (Acceptance Criteria)
 
-* **AC-2.1**: manifest 候选必须是常规文件成员，其**原始 basename** 以 `_content_list_v2.json` 结尾（大小写敏感），随后必须通过 canonical path 安全校验；可位于任意深度，`*` 允许为空前缀。
+* **AC-2.1**: manifest 候选必须同时满足：(a) 成员位于 ZIP **顶层目录**——原始成员名不含 `/`；(b) 其**原始 basename** 以 `_content_list_v2.json` 结尾（大小写敏感），`*` 允许为空前缀。顶层候选随后必须通过 canonical path 安全校验与常规文件判定。位于子目录的同名成员一律不参与定位，也不计入候选数。
 * **AC-2.2**: 必须恰好有一个候选。零个 → `ResultExtractionManifestError(reason="not_found")`；多于一个 → `ResultExtractionManifestError(reason="ambiguous")`，其中 `candidates` 为排序后的 canonical path（最多 20 条），`candidate_count` 为完整数量。
-* **AC-2.3**: 目录项（名称以 `/` 结尾）不匹配后缀，不会被选为候选。basename 匹配后缀但不是常规文件（符号链接、带目录属性等），或名称无法 canonical 化（绝对路径、`..`、反斜杠、NUL/C0/C1 控制字符）时，必须抛出 `ResultExtractionArchiveError(reason="unsafe_member")`，不得静默忽略。
+* **AC-2.3**: 目录项（名称以 `/` 结尾）不在顶层范围，不会被选为候选。顶层候选的 basename 匹配后缀但不是常规文件（符号链接、带目录属性等），或名称无法 canonical 化（反斜杠、NUL/C0/C1 控制字符）时，必须抛出 `ResultExtractionArchiveError(reason="unsafe_member")`，不得静默忽略。
 * **AC-2.4**: 多个 ZIP 成员 canonical 化到同一 manifest 路径时，必须按多个候选处理并报 `ambiguous`；实现不得依赖 `ZipFile.read(name)` 或 `NameToInfo` 的“后值覆盖”语义。
 * **AC-2.5**: 选中的 manifest 必须通过其 `ZipInfo` 对象打开，不得按名称二次查找，避免重复名称把读取重定向到另一个成员。
 * **AC-2.6**: 发现过程必须确定性：候选比较使用 canonical path 的字典序；归档成员顺序不得影响单候选的选择，也不得改变 `ambiguous` 的排序结果。
 * **AC-2.7**: 后缀匹配不得接受 `_content_list.json`、`.JSON`、`_content_list_v2.json.bak`，也不得把目录名中的后缀误判为文件名后缀。
-* **AC-2.8**: 根目录 manifest 与顶层目录下的 manifest 都必须支持；不得假定 manifest 一定在 ZIP 根。
+* **AC-2.8**: 只支持 ZIP 顶层目录的 manifest。顶层不存在而子目录存在同名 manifest 时，必须报 `not_found` 失败关闭，不得回退到子目录，也不得把子目录成员计入 `ambiguous` 候选。
 
 ---
 
@@ -190,17 +190,17 @@ flowchart LR
 ### US-4: 图片提取
 
 **As a** 业务调用方
-**I want to** 拿到 manifest 同级 `images/` 目录下的全部图片字节与稳定路径
+**I want to** 拿到顶层 `images/` 目录下的全部图片字节与稳定路径
 **So that** 我可以直接入库、渲染或上传，而不必再次解压 ZIP
 
 #### 验收标准 (Acceptance Criteria)
 
-* **AC-4.1**: 图片根目录是**选中 manifest 同级**的 `images/`：manifest 位于根时前缀为 `images/`，位于 `result/` 时为 `result/images/`，位于 `a/b/` 时为 `a/b/images/`。只扫描该根目录，其他位置的 `images/` 一律忽略。
+* **AC-4.1**: 图片根目录恒为 ZIP **顶层目录**的 `images/`（manifest 恒在顶层，故「与 manifest 同级」等价于「顶层」）。只扫描顶层 `images/`；子目录中的 `images/`（如 `result/images/`）一律忽略，不合并、不回退。
 * **AC-4.2**: 图片根目录下（含子目录）的每个常规文件都必须被包含，不按扩展名、MIME 或内容过滤；零字节文件也包含，内容为 `b""`。
-* **AC-4.3**: 目录项必须排除；manifest 自身即使位于图片根目录下也必须排除；图片根目录下的符号链接 → `ResultExtractionArchiveError(reason="unsafe_member", member=path)`。
+* **AC-4.3**: 目录项必须排除；图片根目录下的符号链接 → `ResultExtractionArchiveError(reason="unsafe_member", member=path)`。manifest 恒在顶层、不落在 `images/` 前缀内，天然不会被收集。
 * **AC-4.4**: 路径必须 canonical 化：拒绝绝对路径、`..` 段、反斜杠、空名称与 NUL/C0/C1 控制字符；折叠空段与 `.` 段；保留其他字符、大小写与 Unicode。原始路径包含 `images` 段且无法安全 canonical 化时 → `ArchiveError(reason="unsafe_member")`；与图片无关的不安全成员可以忽略。
 * **AC-4.5**: 两个图片成员 canonical 化到同一路径 → `ResultExtractionArchiveError(reason="duplicate_member", member=path)`。
-* **AC-4.6**: `images` 必须按 canonical path 的 Python `str` 字典序升序排列。`path` 必须保留完整归档相对前缀（例如 manifest 在 `result/` 时返回 `result/images/a.jpg`）。
+* **AC-4.6**: `images` 必须按 canonical path 的 Python `str` 字典序升序排列。`path` 必须是完整归档相对路径，恒为 `images/...` 形式（例如 `images/a.jpg`）。
 * **AC-4.7**: 图片根目录不存在或没有常规文件时，`images=[]` 且提取成功；仅有一个 `images/` 目录项不是错误。
 * **AC-4.8**: 构建图片条目列表时，一旦数量超过 `max_images` 必须立即抛出 `ResultExtractionLimitError(resource="image_count", limit=..., actual=已观察数量, member=None)`（`actual` 至少为 `max_images + 1`）；读取任何图片前，若声明 `file_size` 总和 > `max_total_image_bytes` → `ResultExtractionLimitError(resource="total_image_bytes", limit=..., actual=sum, member=None)`。
 * **AC-4.9**: 单张图片读取前，若 `file_size > max_image_bytes` → `ResultExtractionLimitError(resource="image", limit=..., actual=file_size, member=path)`；读取时最多读取 `max_image_bytes + 1` 字节，实际超限时抛出同一异常并令 `actual=len(data)`。
@@ -224,7 +224,7 @@ flowchart LR
 * **AC-5.2**: `ExtractionLimits` 默认值必须为：`max_manifest_bytes = 16 MiB`（16,777,216）、`max_image_bytes = 32 MiB`（33,554,432）、`max_total_image_bytes = 256 MiB`（268,435,456）、`max_images = 10_000`、`max_members = 100_000`。`DEFAULT_EXTRACTION_LIMITS` 必须暴露具有这些值的实例。
 * **AC-5.3**: 每个限额字段必须是正整数（拒绝 `bool`）；非法构造必须抛出 `ResultExtractionConfigurationError(field=<字段名>)`。`extract_result` 的 `limits=None` 表示使用默认值，不提供“无上限”模式。
 * **AC-5.4**: 不得把任何成员解压到磁盘，不得创建临时文件；必须以只读模式打开 ZIP，并通过上下文管理器关闭 `ZipFile`。
-* **AC-5.5**: 只允许读取选中的 manifest 与其图片根目录下的常规文件。其他成员不得被解压；它们的损坏、加密或不支持压缩不得导致提取失败。
+* **AC-5.5**: 只允许读取选中的顶层 manifest 与顶层 `images/` 下的常规文件。其他成员不得被解压；它们的损坏、加密或不支持压缩不得导致提取失败。
 * **AC-5.6**: 所有成员读取必须有界（`archive.open(info)` + `read(limit + 1)`）；不得对 manifest 或图片使用无界的 `ZipFile.read(name)`。必须通过 `ZipInfo` 定位选中成员。
 * **AC-5.7**: 成功与失败后调用方流都必须保持打开。`ZipFile.close()` 不得关闭传入的流；Extractor 不得调用 `stream.close()`。
 * **AC-5.8**: 峰值内存必须按“ZIP 中央目录 `ZipInfo` + manifest 字节 + 解码文本 + Pydantic 模型 + 图片字节 + 结果字典”估算并文档化；`max_members` 只能阻止后续遍历，无法回退 `ZipFile` 已分配的中央目录内存。实现必须包含基于 `tracemalloc` 的合成归档内存测试，不得把压缩后大小当作内存上界。
@@ -266,7 +266,7 @@ flowchart LR
 
 **As a** 维护者
 **I want to** 用纯内存 ZIP 覆盖所有分支
-**So that** CI 不需要网络、磁盘或真实 MinerU 账号
+**So that** CI 不需要网络、磁盘或任何外部服务凭据
 
 #### 验收标准 (Acceptance Criteria)
 
@@ -309,7 +309,7 @@ src/mineru_parser/
     └── _members.py             # 路径规范化、成员发现、有界读取
 ```
 
-> Extractor 不依赖 `client` 或 `downloader` 的 wire 模型，只依赖标准库、`pydantic` 与 `schema.content_v2`。`pydantic>=2.9` 已是项目依赖，无需新增第三方依赖。
+> Extractor 不依赖其他组件的 wire 模型，只依赖标准库、`pydantic` 与 `schema.content_v2`。`pydantic>=2.9` 已是项目依赖，无需新增第三方依赖。
 
 #### 提取时序
 
@@ -324,11 +324,11 @@ sequenceDiagram
     Caller->>EX: extract_result(stream, limits=...)
     EX->>EX: 校验 hooks / limits / stream；记录游标
     EX->>ZF: ZipFile(stream, "r") + infolist()
-    EX->>EX: 定位唯一 *_content_list_v2.json
+    EX->>EX: 定位唯一顶层 *_content_list_v2.json
     EX->>ZF: 有界读取 manifest
     EX->>VA: validate_json(UTF-8 text)
     VA-->>EX: pages（Pydantic 模型）
-    EX->>EX: 定位 <manifest_dir>/images/；去重 / 排序 / 限额
+    EX->>EX: 定位顶层 images/；去重 / 排序 / 限额
     loop 每张图片
         EX->>ZF: 有界读取 image bytes
     end
@@ -380,7 +380,7 @@ DEFAULT_EXTRACTION_LIMITS = ExtractionLimits()
 
 > `max_total_image_bytes` 与 `max_image_bytes` 独立生效；即使单图小于 `max_image_bytes`，累计超过总上限仍会失败。`None` 只表示使用默认值，不表示无限制。
 >
-> `max_members` 在 `ZipFile` 解析中央目录之后检查；它能阻止后续遍历与图片发现，但无法回退 `zipfile` 已分配的 `ZipInfo` 内存。中央目录本身的规模仍受下载器压缩字节上限约束，见 R-2。
+> `max_members` 在 `ZipFile` 解析中央目录之后检查；它能阻止后续遍历与图片发现，但无法回退 `zipfile` 已分配的 `ZipInfo` 内存。中央目录本身的规模仍受调用方提供的 ZIP 字节数上限约束，见 R-2。
 
 #### 输出结构
 
@@ -411,7 +411,7 @@ class ExtractionIssue(TypedDict):
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `pages` | `DocumentContentSchema` | 按 manifest 顺序；每页是版面块模型列表；页号等于下标 + 1 |
-| `images[].path` | `str` | canonical 归档相对路径；根目录 manifest 时为 `images/...` |
+| `images[].path` | `str` | canonical 归档相对路径；恒为 `images/...` |
 | `images[].bytes` | `bytes` | ZIP 成员解压后的精确字节；不转码 |
 
 > 结果不包含 `manifest_path`；需要追踪清单文件名时使用 `mineru.extract` 日志字段，见 Q-2。
@@ -476,6 +476,21 @@ def extract_result(
 
 所有公共名称必须通过 `mineru_parser.extractor.__all__` 与顶层 `mineru_parser.__all__` 导出。
 
+#### 输入契约 (Input Contract)
+
+本组件与调用方之间只有这一层接口面。除下表约定外，Extractor 不感知字节的来源、来源系统的鉴权语义与重试策略。
+
+| 项 | 约定 |
+| :--- | :--- |
+| 介质 | 任意可读、可 seek 的二进制流；典型实现为 `io.BytesIO` |
+| 内容 | 标准 ZIP 归档；字节完整性与格式合法性由调用方保证，不合规时以 `invalid_zip` 失败关闭 |
+| 来源 | 不受限于任何特定上游：上游交付、缓存命中、本地文件、测试夹具均可 |
+| 所有权 | 调用方持有并负责关闭流；Extractor 只读、不关闭、不持有 |
+| 前置条件 | 不依赖网络、磁盘、环境变量或任何全局状态；非 seekable 流须由调用方先缓冲为 `io.BytesIO` |
+
+- 任何能提供符合上述约定的字节流的调用方都可直接调用 `extract_result`，无需适配层。
+- 输入来源的多样性不改变行为：相同字节 + 相同 `limits` 必须产生等价结果，见 AC-1.4 与 AC-7.3。
+
 #### 流生命周期契约
 
 1. **只读**：Extractor 只调用 `read` / `seek` / `tell`，不得写入或截断流。
@@ -496,17 +511,22 @@ def extract_result(
 #### 集成示例
 
 ```python
-from mineru_parser import MinerUApiClient, ResultDownloader, extract_result
+import io
 
-with MinerUApiClient() as client, ResultDownloader() as downloader:
-    result = client.submit("https://example.com/paper.pdf").wait(timeout=600)
-    extracted = extract_result(downloader.resolve(result.zip_url))
+from mineru_parser import extract_result
 
-    pages = extracted["pages"]          # list[list[LayoutElement]]
-    images = extracted["images"]        # [{"path": "images/a.jpg", "bytes": b"..."}]
+# 输入契约：任意可读、可 seek 的二进制流，内容为标准 ZIP 归档
+stream = io.BytesIO(zip_bytes)
+
+extracted = extract_result(stream)
+
+pages = extracted["pages"]          # list[list[LayoutElement]]
+images = extracted["images"]        # [{"path": "images/a.jpg", "bytes": b"..."}]
 ```
 
-> 当 manifest 位于子目录（如 `result/doc_content_list_v2.json`）时，图片 path 会是 `result/images/a.jpg`。manifest 中的 `image_source.path` 通常是相对 manifest 目录的 `images/a.jpg`；如需与输出对应，可使用 `manifest_dir + "/" + reference`，Extractor 不会重写引用。
+> `zip_bytes` 的来源由调用方决定（上游交付、缓存命中、本地文件、测试夹具）；Extractor 不区分来源，也不参与下载或重试。
+
+> manifest 只在 ZIP 顶层被定位，因此图片 path 恒为 `images/...`。manifest 中的 `image_source.path` 通常是相对 manifest 目录的 `images/a.jpg`；由于 manifest 位于顶层，参考路径与输出 path 可直接对应，Extractor 不会重写引用。
 
 ### 3.4 提取算法 (Extraction Algorithm)
 
@@ -579,7 +599,6 @@ def extract_result(
                 archive,
                 infos,
                 limits=limits,
-                manifest_path=manifest_path,
             )
 
         outcome = "success"
@@ -824,8 +843,10 @@ def _discover_manifest(
 
     for info in infos:
         raw = info.filename
-        raw_base = raw.rsplit("/", 1)[-1]
-        if not raw_base.endswith(_MANIFEST_SUFFIX):
+        # 搜索范围：仅 ZIP 顶层目录，原始名不含 "/"。
+        if "/" in raw:
+            continue
+        if not raw.endswith(_MANIFEST_SUFFIX):
             continue
 
         path = canonical_member_path(raw)
@@ -864,23 +885,23 @@ def _discover_manifest(
     return candidates[0]
 ```
 
-- 匹配发生在**原始 basename** 上，因此 `./foo_content_list_v2.json` 可以被规范化接受，而 `dir/../foo_content_list_v2.json` 会失败关闭。
-- 目录项 `foo_content_list_v2.json/` 的 basename 为空，不会成为候选。
-- 同名重复成员会产生两个候选，统一报 `ambiguous`。
+- 搜索范围由**原始成员名**判定：不含 `/` 的成员才算顶层成员，因此 `result/foo_content_list_v2.json`、`./foo_content_list_v2.json`、`__MACOSX/._foo_content_list_v2.json`、`/foo_content_list_v2.json` 一律不参与定位，也不计入候选数。
+- 顶层成员的 basename 即原始名本身，后缀匹配（大小写敏感）发生在该名称上。
+- 目录项 `foo_content_list_v2.json/` 名称以 `/` 结尾，不在顶层范围，不会成为候选。
+- 顶层候选名称若无法 canonical 化（反斜杠、NUL/C0/C1 控制字符），失败关闭 `unsafe_member`。
+- 同名重复的顶层成员会产生两个候选，统一报 `ambiguous`。
 
 #### 图片根目录
 
-图片根目录由 manifest 的 canonical path 推导：
+图片根目录恒为 ZIP 顶层目录的 `images/`：
 
-| manifest canonical path | 图片根前缀 | 输出示例 |
+| 范围 | 图片根前缀 | 输出示例 |
 | :--- | :--- | :--- |
-| `foo_content_list_v2.json` | `images/` | `images/a.jpg` |
-| `result/foo_content_list_v2.json` | `result/images/` | `result/images/a.jpg` |
-| `a/b/foo_content_list_v2.json` | `a/b/images/` | `a/b/images/c.jpg` |
+| 顶层 | `images/` | `images/a.jpg` |
 
-- 只扫描该前缀下的常规文件；`result/images/` 不会与根 `images/` 合并。
-- manifest 自身即使位于该前缀下也必须排除。
-- 若 manifest 在 `result/` 而图片在根 `images/`，结果为 `images=[]`；这是确定性规则，不做回退，见 Q-16。
+- manifest 恒在顶层，故「与 manifest 同级」等价于「顶层」。
+- 只扫描 `images/` 前缀下的常规文件（含其子目录）；`result/images/` 之类不会与顶层 `images/` 合并，也不回退。
+- 顶层 manifest 恒不在 `images/` 前缀内，天然不会被收集。
 
 #### 图片收集
 
@@ -890,14 +911,8 @@ def _collect_images(
     infos: list[zipfile.ZipInfo],
     *,
     limits: ExtractionLimits,
-    manifest_path: str,
 ) -> list[ExtractedImage]:
-    manifest_dir = manifest_path.rpartition("/")[0]
-    image_root = (
-        f"{manifest_dir}/{_IMAGES_DIRNAME}/"
-        if manifest_dir
-        else f"{_IMAGES_DIRNAME}/"
-    )
+    image_root = f"{_IMAGES_DIRNAME}/"
 
     entries: list[tuple[str, zipfile.ZipInfo]] = []
     for info in infos:
@@ -914,8 +929,6 @@ def _collect_images(
             continue
 
         if not path.startswith(image_root):
-            continue
-        if path == manifest_path:
             continue
         if not is_regular_file(info):
             if _looks_like_symlink(info):
@@ -1066,7 +1079,7 @@ def _read_member(
 1. 校验 on_metric / correlation_id，构造 Telemetry
 2. 校验 limits / stream，记录游标
 3. zipfile.ZipFile(stream, "r")；解析中央目录
-4. 发现唯一 manifest（仅扫描成员名，不读数据）
+4. 发现唯一顶层 manifest（仅扫描顶层成员名，不读数据）
 5. 有界读取 manifest
 6. UTF-8（去可选 BOM）解码
 7. json_invalid / RecursionError 分类；否则 TypeAdapter[DocumentContentSchema]
@@ -1225,16 +1238,17 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 流不是二进制 | `io.TextIOBase` / 文本流 | `extract_result` | 读取 ZIP 前拒绝 | `ResultExtractionConfigurationError(field="stream")` |
 | 流不可 seek | 管道 / socket / 非 seekable 包装 | `extract_result` | 读取 ZIP 前拒绝 | `ResultExtractionConfigurationError(field="stream")` |
 | `tell()` 失败 / 不可 seek | 已关闭流 / 自定义流异常 / `seekable()` 为假 | `extract_result` | 读取 ZIP 前拒绝 | `ResultExtractionConfigurationError(field="stream")` |
-| 空流 | downloader 返回空 `BytesIO`（如 204） | `extract_result` | `ZipFile` 解析失败 | `ArchiveError(reason="invalid_zip")` |
+| 空流 | 调用方传入空 `BytesIO`（如上游返回 204） | `extract_result` | `ZipFile` 解析失败 | `ArchiveError(reason="invalid_zip")` |
 | 非 ZIP 内容 | HTML 错误页 / 纯文本 | `extract_result` | `ZipFile` 解析失败 | `ArchiveError(reason="invalid_zip")` |
 | ZIP 损坏 / 截断 | 中央目录或成员数据损坏 | `extract_result` | 失败关闭 | `ArchiveError(reason="invalid_zip")` / `corrupt_member` |
 | ZIP64 / 超大归档 | 超过普通 ZIP 限制 | `extract_result` | `LargeZipFile` 或限额 | `ArchiveError(reason="invalid_zip")` / `LimitError` |
 | ZIP 成员过多 | 成员数 > `max_members` | 打开中央目录后 | 不进入 manifest 发现 | `LimitError(resource="member_count")` |
-| 无 manifest | ZIP 内没有匹配后缀的文件 | 发现阶段 | 失败关闭 | `ManifestError(reason="not_found")` |
-| 多份 manifest | 两份或以上匹配文件 | 发现阶段 | 不猜测，失败关闭 | `ManifestError(reason="ambiguous")` |
-| 重复 manifest 成员 | 同名成员出现两次 | 发现阶段 | 按多个候选处理 | `ManifestError(reason="ambiguous")` |
-| manifest 位于子目录 | `result/doc_content_list_v2.json` | 发现阶段 | 正常支持；图片根为 `result/images/` | 成功 |
-| manifest 路径不安全 | 绝对路径 / `..` / 反斜杠 / 控制字符 | 发现阶段 | 失败关闭 | `ArchiveError(reason="unsafe_member")` |
+| 无 manifest | ZIP 顶层没有匹配后缀的文件 | 发现阶段 | 失败关闭 | `ManifestError(reason="not_found")` |
+| 多份 manifest | 顶层两份或以上匹配文件 | 发现阶段 | 不猜测，失败关闭 | `ManifestError(reason="ambiguous")` |
+| 重复 manifest 成员 | 同名顶层成员出现两次 | 发现阶段 | 按多个候选处理 | `ManifestError(reason="ambiguous")` |
+| manifest 位于子目录 | `result/doc_content_list_v2.json` | 发现阶段 | 不在顶层范围，忽略且不回退 | `ManifestError(reason="not_found")` |
+| manifest 名称含目录前缀 | `./foo_content_list_v2.json` | 发现阶段 | 不在顶层范围，忽略 | `ManifestError(reason="not_found")` |
+| manifest 路径不安全 | 顶层成员名含反斜杠 / 控制字符 | 发现阶段 | 失败关闭 | `ArchiveError(reason="unsafe_member")` |
 | manifest 是符号链接 | Unix mode 指示 symlink | 发现阶段 | 失败关闭 | `ArchiveError(reason="unsafe_member")` |
 | manifest 加密 | `flag_bits & 0x1` | 读取阶段 | 失败关闭 | `ArchiveError(reason="encrypted_member")` |
 | manifest 压缩不支持 | `NotImplementedError` | 读取阶段 | 失败关闭 | `ArchiveError(reason="unsupported_compression")` |
@@ -1248,10 +1262,10 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 空文档 | JSON 为 `[]` | 校验阶段 | 合法 | `pages=[]` |
 | 空页 | JSON 含 `[[]]` | 校验阶段 | 合法 | 对应页为空列表 |
 | 已知块有额外字段 | Pydantic 默认 `extra="ignore"` | 校验阶段 | 忽略额外字段 | 成功 |
-| 缺少 images 目录 | ZIP 内无 `images/` | 图片发现 | 不算错误 | `images=[]` |
+| 缺少 images 目录 | ZIP 内无顶层 `images/` | 图片发现 | 不算错误 | `images=[]` |
 | 空 images 目录 | 只有目录项，没有文件 | 图片发现 | 不算错误 | `images=[]` |
-| nested manifest + 根 images | manifest 在 `result/`，图片在根 `images/` | 图片发现 | 只扫描同级 `result/images/` | `images=[]` |
-| 多个 images 目录 | 根与 `result/` 下都有 `images/` | 图片发现 | 只扫描 manifest 同级 | 只返回同级图片 |
+| 子目录 images 目录 | 只有 `result/images/`，无顶层 `images/` | 图片发现 | 只扫描顶层 `images/`，不回退 | `images=[]` |
+| 多个 images 目录 | 顶层与 `result/` 下都有 `images/` | 图片发现 | 只扫描顶层 `images/` | 只返回顶层图片 |
 | 零字节图片 | 成员大小为 0 | 图片读取 | 包含 | `bytes=b""` |
 | 图片路径重复 | 两个成员 canonical 到同一 path | 图片发现 | 失败关闭 | `ArchiveError(reason="duplicate_member")` |
 | 图片路径不安全 | `images/../x` / 绝对路径 / 控制字符 | 图片发现 | 失败关闭 | `ArchiveError(reason="unsafe_member")` |
@@ -1265,11 +1279,10 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 单图实际超限 | 声明撒谎，实际超过上限 | 单图读取中 | 有界读取后失败 | `LimitError(resource="image")` |
 | 图片实际总量超限 | 累计实际字节超过上限 | 每张读取后 | 失败关闭 | `LimitError(resource="total_image_bytes")` |
 | 无关成员损坏 | 非 manifest / 非图片成员加密或损坏 | 全流程 | 不读取，不影响结果 | 成功 |
-| manifest 在图片根下 | 选中 manifest 位于 `images/` | 图片发现 | 从图片列表中排除 | 成功 |
 | 非 UTF-8 成员名 | 归档未设置 UTF-8 标志 | 发现阶段 | Python 按 cp437 解码；不重新猜测 | 使用解码后的名称 |
 | 反斜杠路径 | `images\a.jpg` | 发现阶段 | canonical 拒绝反斜杠；该名称不属于 `images/` | 被忽略 |
 | 大写目录 | `Images/a.jpg` | 发现阶段 | 大小写敏感，不匹配 | 被忽略 |
-| macOS 资源分叉 | `__MACOSX/._foo_content_list_v2.json` | 发现阶段 | 可能与真实 manifest 组成多候选 | `ManifestError(reason="ambiguous")` |
+| macOS 资源分叉 | `__MACOSX/._foo_content_list_v2.json` | 发现阶段 | 不在顶层范围，忽略，不构成多候选 | 正常提取顶层 manifest |
 | 图片引用缺失 | `image_source.path` 不在 `images` 中 | 全流程 | 不做交叉校验 | 成功 |
 | 图片字节损坏 | 图片内容不是合法图片格式 | 全流程 | 不做解码/嗅探 | 原样返回 |
 | 游标恢复失败 | 流被并发关闭或底层异常 | `finally` | 记录警告，不覆盖主结果 | 主结果保持不变 |
@@ -1294,7 +1307,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 * [ ] 以只读模式打开 `ZipFile`，映射 `BadZipFile` / `LargeZipFile` / `OSError`
 * [ ] 实现 `max_members` 总量检查，避免对超大中央目录继续做发现与图片遍历
 * [ ] 实现 `canonical_member_path`、控制字符/反斜杠拒绝、常规文件/符号链接判定
-* [ ] 实现 manifest 唯一发现、`not_found` / `ambiguous` / `unsafe_member`
+* [ ] 实现 manifest 唯一发现（仅顶层范围）、`not_found` / `ambiguous` / `unsafe_member`
 * [ ] 实现 `archive.open(info)` 有界读取与加密 / 压缩 / 损坏 / I/O 错误映射
 
 * [ ] **Phase 3: JSON 与 Schema 校验**
@@ -1304,7 +1317,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 * [ ] 确认返回的是 Pydantic 模型实例，且不调用 `model_dump()`
 
 * [ ] **Phase 4: 图片提取**
-* [ ] 解析 manifest 同级 `images/` 根目录；排除 manifest、目录项与符号链接
+* [ ] 解析顶层 `images/` 根目录；排除目录项与符号链接
 * [ ] 实现 canonical path 去重、字典序排序
 * [ ] 实现数量、声明总字节、单图、实际总字节四类限额
 * [ ] 实现图片有界读取与错误映射
@@ -1326,9 +1339,9 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 验收标准 | 计划测试 |
 | :--- | :--- |
 | AC-1.1 ~ AC-1.10 | `test_extract_basic_contract`、`test_stream_position_restored`、`test_stream_not_closed`、`test_non_seekable_stream_rejected`、`test_invalid_limits_rejected`、`test_public_exports` |
-| AC-2.1 ~ AC-2.8 | `test_manifest_discovery_root`、`test_manifest_discovery_nested`、`test_manifest_not_found`、`test_manifest_ambiguous`、`test_manifest_suffix_case_sensitive`、`test_duplicate_manifest_member`、`test_unsafe_manifest_member` |
+| AC-2.1 ~ AC-2.8 | `test_manifest_discovery_root`、`test_manifest_nested_not_found`、`test_manifest_not_found`、`test_manifest_ambiguous`、`test_manifest_suffix_case_sensitive`、`test_duplicate_manifest_member`、`test_unsafe_manifest_member` |
 | AC-3.1 ~ AC-3.10 | `test_manifest_too_large_declared`、`test_manifest_too_large_actual`、`test_manifest_invalid_utf8`、`test_manifest_invalid_json`、`test_manifest_too_deep`、`test_validation_issues_sanitized`、`test_empty_document`、`test_extra_fields_ignored` |
-| AC-4.1 ~ AC-4.14 | `test_images_adjacent_to_manifest`、`test_root_images_ignored_for_nested_manifest`、`test_images_sorted`、`test_image_bytes_exact`、`test_zero_byte_image`、`test_duplicate_image_path`、`test_unsafe_image_path`、`test_symlink_image_rejected`、`test_encrypted_image`、`test_unsupported_compression_image`、`test_corrupt_image`、`test_image_limits`、`test_missing_image_root`、`test_no_cross_validation` |
+| AC-4.1 ~ AC-4.14 | `test_images_at_archive_root`、`test_nested_images_ignored`、`test_images_sorted`、`test_image_bytes_exact`、`test_zero_byte_image`、`test_duplicate_image_path`、`test_unsafe_image_path`、`test_symlink_image_rejected`、`test_encrypted_image`、`test_unsupported_compression_image`、`test_corrupt_image`、`test_image_limits`、`test_missing_image_root`、`test_no_cross_validation` |
 | AC-5.1 ~ AC-5.9 | `test_invalid_zip`、`test_empty_stream`、`test_member_count_limit`、`test_unrelated_member_ignored`、`test_no_disk_extraction`、`test_limits_defaults_and_validation`、`test_memory_bound_with_tracemalloc`、`test_no_retry` |
 | AC-6.1 ~ AC-6.9 | `test_error_hierarchy`、`test_validation_error_has_no_content`、`test_outcome_mapping`、`test_metrics_emitted_once`、`test_metric_hook_failure_swallowed`、`test_correlation_id_in_logs`、`test_unexpected_exception_propagates` |
 | AC-7.1 ~ AC-7.5 | `test_in_memory_only`、`test_deterministic_output`、`test_schema_adapter_reused` |
@@ -1342,10 +1355,10 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 | 编号 | 风险 / 问题描述 | 潜在影响 | 缓解 / 规避方案 | 状态 / 负责人 |
 | :--- | :--- | :--- | :--- | :--- |
 | `[R-1]` | 默认限额未用真实结果包校准 | 大文档被误拒，或默认上限仍过高 | 已核对 1 个最小样本（manifest 4.8 KB、单图 13.9 KB，远低于默认值）；仍需用更多样本统计 manifest / 单图 / 总图片字节的 P50/P95/P99，并通过 `ExtractionLimits` 按场景覆盖 | 待评估 / @jackafx |
-| `[R-2]` | 压缩炸弹、解压 CPU 放大与超大中央目录 | 虽然有解压后限额，但 zlib 仍可能消耗大量 CPU；`ZipFile` 在 `max_members` 检查前已分配 `ZipInfo` | 有界读取 + 解压后字节/数量上限 + `max_members`；中央目录规模受下载器压缩字节上限约束；保持 Python/zlib 更新；必要时在调用方做超时/隔离 | 待评估 / @jackafx |
+| `[R-2]` | 压缩炸弹、解压 CPU 放大与超大中央目录 | 虽然有解压后限额，但 zlib 仍可能消耗大量 CPU；`ZipFile` 在 `max_members` 检查前已分配 `ZipInfo` | 有界读取 + 解压后字节/数量上限 + `max_members`；中央目录规模受调用方提供的 ZIP 字节数上限约束；保持 Python/zlib 更新；必要时在调用方做超时/隔离 | 待评估 / @jackafx |
 | `[R-3]` | Pydantic 模型内存远大于 JSON 字节 | 峰值内存超过凭 manifest 大小估算的值 | 使用 `tracemalloc` 测试真实样例；文档说明模型放大；必要时调低 `max_manifest_bytes` | 待评估 / @jackafx |
 | `[R-4]` | `content_v2` Schema 漂移 | 上游新增 block type / 字段导致校验失败或额外字段被忽略 | 用真实结果包做契约测试；未知 `type` 失败关闭；版本升级时同步 Schema | 待评估 / @jackafx |
-| `[R-5]` | 结果包目录布局漂移 | manifest 或 `images/` 移到其他层级，导致 `images=[]` | 用真实样例覆盖根目录与子目录布局；监控 `outcome=success` 但 `images=0` 的比例 | 待评估 / @jackafx |
+| `[R-5]` | 结果包目录布局漂移 | manifest 落到子目录时报 `not_found`；`images/` 落到子目录时返回 `images=[]` | 布局漂移表现为显式失败或空图片集，不会静默读到错误内容；用真实样例确认顶层布局；监控 `outcome=manifest_error` 与 `outcome=success` 但 `images=0` 的比例 | 待评估 / @jackafx |
 | `[R-6]` | ZIP 成员名编码差异 | 未设置 UTF-8 标志时 Python 按 cp437 解码，路径出现 mojibake | 文档说明使用服务端原始 ZIP；调用方可用 bytes 层重新编码；不在 Extractor 内猜测 | 已缓解 / @jackafx |
 | `[R-7]` | 返回的 path 被下游直接拼磁盘路径 | 目录穿越或覆盖文件 | Extractor 拒绝 `..` / 绝对路径；下游仍必须做目标目录约束 | 待评估 / @jackafx |
 | `[R-8]` | manifest 与图片引用不一致 | 页面引用的图片缺失，或存在未引用图片 | 本期不做交叉校验；下游按需检查；未来可增加 strict 模式（Q-3） | 待评估 / @jackafx |
@@ -1362,7 +1375,7 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 
 > **已闭环（划线/归档）：**
 > * [x] ~~`[Q-0]`：Extractor 是否负责下载/重试？~~
->   * **决策结论**：不负责。下载与重试属于 `ResultDownloader`；Extractor 只解析内存 ZIP。
+>   * **决策结论**：不负责。下载与重试属于上游下载组件；Extractor 只解析内存 ZIP。
 
 #### 1. 核心架构与契约 (Architecture & Contract)
 
@@ -1373,9 +1386,9 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
 * [x] **`[Q-3]`**：是否交叉校验 `image_source.path` 与 `images`？
   * **决策结论**：v1 不做。缺失引用与未引用图片都可能合法；严格模式需要单独定义“引用解析基准”，留待后续评估。
 * [x] **`[Q-4]`**：图片根目录按根 `images/` 还是 manifest 同级 `images/`？
-  * **决策结论**：按 manifest 同级。manifest 在根时等价于根 `images/`；子目录 manifest 也能正确找到同级图片。若真实包把图片放根目录而 manifest 在子目录，结果为 `images=[]`，见 Q-16。
+  * **决策结论**：按顶层 `images/`。Goal 2 把 manifest 定位收敛到 ZIP 顶层后，“与 manifest 同级”恒等于“顶层”，因此图片根目录恒为顶层 `images/`；子目录 `images/` 一律忽略，不合并、不回退。
 * [x] **`[Q-5]`**：是否只提取常见图片扩展名？
-  * **决策结论**：不按扩展名过滤；`images/` 下所有常规文件都返回。扩展名不可信，且 MinerU 可能新增格式。
+  * **决策结论**：不按扩展名过滤；`images/` 下所有常规文件都返回。扩展名不可信，且上游服务可能新增格式。
 * [x] **`[Q-6]`**：是否启用 Pydantic `strict=True`？
   * **决策结论**：v1 不启用，严格沿用 `content_v2` 当前语义；若上游出现类型漂移，再评估严格模式或 Schema 层约束。
 * [x] **`[Q-7]`**：是否支持 v1 `content_list.json` / `middle.json`？
@@ -1396,12 +1409,8 @@ def _validate_manifest(raw: bytes, path: str) -> DocumentContentSchema:
   * **决策结论**：属于；与其他组件保持一致，但 `on_metric` / `correlation_id` 均为可选。
 * [x] **`[Q-15]`**：是否接受 `bytes` 作为输入？
   * **决策结论**：不接受；只接受流，保持游标/所有权语义清晰。调用方可 `io.BytesIO(data)`。
-* [ ] **`[Q-16]`**：manifest 在子目录、图片在根 `images/` 时，是否回退到根目录？
-  * **现状 / 影响**：当前严格按 manifest 同级查找；若真实包存在这种布局，会返回 `images=[]`。
-  * **备选方案**：
-    * **方案 A**：保持同级规则，布局不一致视为上游问题。
-    * **方案 B**：同级为空时回退根 `images/`，增加兼容性但引入启发式。
-  * **跟进人 / 期限**：@jackafx | 用真实样本校准后决定。
+* [x] **`[Q-16]`**：manifest 在子目录、图片在根 `images/` 时，是否回退到根目录？
+  * **决策结论**：不再适用。Goal 2 把 manifest 定位收敛到 ZIP 顶层后，子目录 manifest 不被定位（`not_found` 失败关闭），子目录 `images/` 也不被扫描；不引入任何回退或启发式。
 * [ ] **`[Q-17]`**：是否需要按内容哈希去重图片？
   * **结论**：暂不纳入；每个路径一条记录。若下游存储成本成为问题，再增加可选去重层。
 * [ ] **`[Q-18]`**：是否在结果中增加页面元数据（页号、原始画像尺寸等）？
