@@ -1,5 +1,17 @@
 # Changelog: SPEC-003 Result Extractor
 
+## [2026-10-21] - 实现完成：任务拆解勾选、AC↔测试映射回填、状态推进为 Approved
+
+- **修改类型**: Changed
+- **影响范围**: Header（状态）、§1.3 目标（Goal 1 ~ 12）、§5 任务拆解（Phase 0 ~ 6 全部复选框、AC↔测试映射表）
+- **变更原因**: 实现已随 `feat(extractor)` 提交落地（提交 `d03184f`），`tests/test_extractor.py` + `tests/test_extractor_property.py` 共 123 个测试全部通过，但 §5 的任务复选框与 AC↔测试映射表仍停留在计划态（"当前 Spec 为 Draft，以下为计划测试名"），Header 状态也未随实现推进。
+- **具体内容**:
+  - **Goal 与 Phase 勾选**：§1.3 的 Goal 1 ~ 12 全部勾选；§5 Phase 0（库级根异常）、Phase 1（公共契约）、Phase 2（ZIP 与 Manifest 发现）、Phase 3（JSON 与 Schema 校验）、Phase 4（图片提取）、Phase 5（生命周期/遥测/测试）、Phase 6（Spec 形态收敛，已于前序提交完成）全部勾选并标注完成依据。Phase 5 的 $k_{\text{model}}$ 条目保留 R-3 待标定说明——`tracemalloc` 测试已就位，但标定值尚未回写 §3.2。
+  - **AC↔测试映射回填**：映射表由"计划测试名"替换为 `tests/test_extractor.py` / `tests/test_extractor_property.py` 中的**实际测试名**；计划名与实际名不一致处（如 `test_stream_position_restored` → `test_stream_position_restored_on_success_and_failure`、`test_non_seekable_stream_rejected` 并入 `test_invalid_streams_rejected_before_zip_read`）以实际名为准。
+  - **状态推进**：`Draft` → `Approved`。代码与测试已在 `feature/result-extrator` 分支完成，待 PR 合并后按生命周期推进为 `Implemented`。
+- **说明**: 本轮**未改变任何契约语义**——AC 清单、异常体系、限额默认值与判定规则保持不变；改动仅是进度事实的落盘。真实样本契约测试为 `test_real_sample_contract`（样本 `tests/data/result_001.zip`），与 §1.2 样本基线逐字节吻合。
+- **状态**: Approved。
+
 ## [2026-10-21] - 评审修订：异常链契约、成员数预检闸门、错误分类与资源预算
 
 - **修改类型**: Changed / Fixed
