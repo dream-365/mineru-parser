@@ -14,12 +14,19 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from ..errors import MinerUParserError
+
 if TYPE_CHECKING:
     from .models import MinerUTaskStatus
 
 
-class MinerUError(Exception):
-    """MinerU 客户端异常基类。"""
+class MinerUError(MinerUParserError):
+    """MinerU 客户端异常基类。
+
+    继承库级根 ``MinerUParserError``，与 ``ResultDownloadError`` /
+    ``ResultExtractionError`` **互不继承**；既有 ``except MinerUError`` 的
+    捕获语义不变。
+    """
 
 
 class MinerUTransientError(MinerUError):

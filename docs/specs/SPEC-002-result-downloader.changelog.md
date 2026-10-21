@@ -1,5 +1,22 @@
 # Changelog: SPEC-002 ResultDownloader
 
+## [2026-10-21] - 引入库级公共根异常 `MinerUParserError`，并指向 SPEC-003
+
+- **修改类型**: Changed / Added
+- **影响范围**: 1.4 非目标、US-8（新增 AC-8.10）、3.1 包结构、3.2 异常体系、3.3 公共 API 稳定性、6.2 待决事项 Q-0 / Q-10
+- **变更原因**: SPEC-003（Result Extractor）落地后，库内出现第三条失败路径。三条路径需要能"一网打尽"地统一捕获，但必须保持互不继承——下载失败可重试，解析失败是终态，不能被同一个 `except` 混为一谈。本 Spec 此前已在 3.2 与 Q-10 中预告过该共享根的设计，本次正式落地。
+- **具体内容**:
+  - 新增库级公共根异常 `MinerUParserError`（定义于 `mineru_parser/errors.py`，由 `mineru_parser` 顶层导出），直接继承 `Exception`；`ResultDownloadError` 改为**同时**继承它，既有子类层次（`ResultDownloadConfigurationError` / `ResultDownloadSecurityError` / `ResultDownloadTooLargeError` / `ResultDownloadContentTypeError` / `ResultDownloadHTTPError` / `ResultDownloadTransientError` / `ResultDownloadTimeoutError`）完全不变。
+  - 3.2 异常体系图更新为 `MinerUParserError → ResultDownloadError → ...`，并改写原"本期不引入库级共享错误根"的说明：共享根已引入，但 `ResultDownloadError` 与 `MinerUError`、`ResultExtractionError` **互不继承**。
+  - 3.1 包结构新增 `errors.py`（库级根异常）；3.3 公共 API 稳定性表的"稳定"层加入 `MinerUParserError`。
+  - 新增 AC-8.10：继承关系与互不继承约束必须由 `issubclass` 断言覆盖。
+  - Q-10 结论更新为"已引入"，并补记引入时机与理由（成本随组件数量线性增长，趁组件最少时落地最优）。
+  - Q-0 与 1.4 非目标补充落地指向：解压与内容解析由 **SPEC-003** 承担，下载器交付边界止于 `io.BytesIO`。
+  - §5 新增 **Phase 5**（库级公共根异常的代码落地：`ResultDownloadError` 继承调整、顶层导出、模块说明更新、继承断言测试、全量回归）与 **Phase 6**（§3.4 / §3.6 实现伪码收敛为契约条款，落实 `docs/specs/CLAUDE.md` §1.6「除契约和示例外，SPEC 中不允许出现具体代码实现」）；AC-8.10 同步补入 AC 与测试映射表。
+- **说明**: 属**纯加性**变更——既有 `except ResultDownloadError` 的捕获语义完全不变。下载器的重试、SSRF、超时等既有契约未发生其他变化。
+- **代码落地**: 继承调整随 SPEC-003 的 Phase 0 一并实现。在此之前 `ResultDownloadError` 仍直接继承 `Exception`；两种状态的捕获行为无差异，仅 AC-8.10 的 `issubclass` 断言需等到 Phase 0 落地后才成立。
+- **状态**: In Review。
+
 ## [2026-10-21] - 代码评审修复（超时 / 异常链 / 校验边界）
 
 - **修改类型**: Fixed

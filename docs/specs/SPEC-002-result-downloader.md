@@ -98,7 +98,7 @@ flowchart LR
 
 > 明确本次迭代**不包含**的内容，防止需求范围膨胀（Scope Creep）。
 
-- [ ] 解压 ZIP、校验压缩包内部结构、防御 ZIP 炸弹；下载器只负责传输。
+- [ ] 解压 ZIP、校验压缩包内部结构、防御 ZIP 炸弹；下载器只负责传输。解压与内容解析由 SPEC-003（Result Extractor）承担，下载器的交付边界止于 `io.BytesIO`。
 - [ ] 校验内容哈希 / 签名（如 SHA-256、`Content-MD5`）。
 - [ ] 磁盘落盘、临时文件、流式落盘阈值切换；本期固定返回 `io.BytesIO`。
 - [ ] Range 请求、断点续传、分片下载。
@@ -297,6 +297,7 @@ flowchart LR
 * **AC-8.7**: `close()` 后继续调用 `resolve()` 的行为未定义；调用方必须在关闭后停止使用实例。该约束必须在文档中说明。
 * **AC-8.8**: 注入 Session 不得携带 `Authorization`、`Proxy-Authorization`、`Cookie`、`Cookie2` 全局头，且 `session.auth` 必须为 `None`；构造时发现任一条件不满足，必须抛出 `ResultDownloadConfigurationError`。需要认证时应通过构造参数 `headers` 传入，以便 AC-6.9 的跨源移除策略生效。Session 的 Cookie jar 由调用方负责，下载器不保证跨源 Cookie 隔离；需要强隔离时应注入干净的专用 Session。
 * **AC-8.9**: 自建 Session 的 `trust_env` 行为必须按 AC-6.13 文档化；注入 Session 的 `trust_env` 由调用方负责；下载器不得在不说明的情况下改变 `requests` 的代理语义。
+* **AC-8.10**: `ResultDownloadError` 必须继承库级根异常 `MinerUParserError`（定义于 `mineru_parser/errors.py`，由 `mineru_parser` 顶层导出）；`MinerUError` 同样继承该根，但两者**互不继承**——捕获其一不得捕获另一方的任何子类。该继承关系必须由 `issubclass` 断言覆盖。
 
 ---
 
@@ -339,6 +340,7 @@ flowchart LR
 src/mineru_parser/
 ├── _telemetry.py              # 从 client/_telemetry.py 提取的共享实现
 ├── _http.py                   # 共享 HTTP 工具（Retry-After / status_class）
+├── errors.py                  # MinerUParserError（库级公共根异常）
 ├── client/
 │   └── ...
 └── downloader/
@@ -350,6 +352,8 @@ src/mineru_parser/
 ```
 
 > `client` 与 `downloader` 共同使用 `_telemetry.py`；`mineru_parser.__init__` 与 `mineru_parser.client.__init__` 的既有导出保持兼容。`downloader` 不依赖 `client` 的 wire 模型，避免把通用下载器绑定到 MinerU API。
+>
+> `downloader/errors.py` 的 `ResultDownloadError` 继承库级根异常 `mineru_parser.errors.MinerUParserError`（见 §3.2 异常体系）；`downloader` 只依赖该基类，不依赖 `client` 的任何异常。
 
 #### 下载时序
 
@@ -498,14 +502,15 @@ class _DownloadOutcome:
 #### 异常体系
 
 ```text
-ResultDownloadError
-├── ResultDownloadConfigurationError   # 本地配置 / 初始 URL 非法
-├── ResultDownloadSecurityError        # SSRF、非 HTTP(S)、TLS、重定向越界 / 降级
-├── ResultDownloadTooLargeError        # 超过 max_bytes
-├── ResultDownloadContentTypeError     # 内容类型白名单不匹配
-├── ResultDownloadHTTPError            # 终态 HTTP 状态（含 206、未跟随的 3xx）
-└── ResultDownloadTransientError       # 重试耗尽
-    └── ResultDownloadTimeoutError     # 超时或总预算耗尽
+MinerUParserError                  # 库级公共根异常
+└── ResultDownloadError
+    ├── ResultDownloadConfigurationError   # 本地配置 / 初始 URL 非法
+    ├── ResultDownloadSecurityError        # SSRF、非 HTTP(S)、TLS、重定向越界 / 降级
+    ├── ResultDownloadTooLargeError        # 超过 max_bytes
+    ├── ResultDownloadContentTypeError     # 内容类型白名单不匹配
+    ├── ResultDownloadHTTPError            # 终态 HTTP 状态（含 206、未跟随的 3xx）
+    └── ResultDownloadTransientError       # 重试耗尽
+        └── ResultDownloadTimeoutError     # 超时或总预算耗尽
 ```
 
 | 异常 | 附加字段 | 说明 |
@@ -516,7 +521,9 @@ ResultDownloadError
 | `ResultDownloadTransientError` | `attempts`、`last_error`（脱敏摘要）、`last_status_code`（可为 `None`）、`retry_after`（可为 `None`） | 重试耗尽后的最终分类 |
 | `ResultDownloadTimeoutError` | 继承上述字段 | 最后一次失败为超时，或总预算耗尽 |
 
-> `ResultDownloadError` 独立于既有 `MinerUError` 体系；下载与 MinerU API 调用是两条可独立捕获的失败路径。本期不引入库级共享错误根；若未来需要“一网打尽”的捕获方式，可新增 `MinerUParserError` 并让 `MinerUError` / `ResultDownloadError` 同时继承它，该变更向后兼容。
+> `ResultDownloadError` 独立于既有 `MinerUError` 体系；下载与 MinerU API 调用是两条可独立捕获的失败路径。两者共享库级根异常 `MinerUParserError`（定义于 `mineru_parser/errors.py`，由 `mineru_parser` 顶层导出）：`ResultDownloadError` 继承 `MinerUParserError`，`MinerUError` 亦继承之，**但两者互不继承**，因此 `except ResultDownloadError` 不会捕获客户端异常，反之亦然。该根异常由 SPEC-003 引入，属纯加性变更：既有 `except ResultDownloadError` / `except MinerUError` 的捕获语义完全不变，新增的只是"一网打尽"捕获全库失败的能力。
+>
+> `ResultExtractionError`（SPEC-003）同样继承 `MinerUParserError`，与下载失败路径互不继承。
 >
 > `ResultDownloadTimeoutError` 继承 `ResultDownloadTransientError`，便于调用方统一捕获超时类失败；它不表示同一次 `resolve()` 内部仍会继续重试。
 >
@@ -573,7 +580,7 @@ class ResultDownloader:
 
 | 层级 | 名称 | 承诺 |
 | :--- | :--- | :--- |
-| **稳定** | `ResultDownloader`、`resolve`、`close`、`max_bytes`、`retry_policy`、`DownloadRetryPolicy`、`DEFAULT_DOWNLOAD_RETRY_POLICY`、异常体系 | 遵循 SemVer；大版本才允许破坏性变更 |
+| **稳定** | `ResultDownloader`、`resolve`、`close`、`max_bytes`、`retry_policy`、`DownloadRetryPolicy`、`DEFAULT_DOWNLOAD_RETRY_POLICY`、异常体系、`MinerUParserError` | 遵循 SemVer；大版本才允许破坏性变更 |
 | **高级 / 测试缝** | `sleep`、`monotonic`、`wall_clock`、`random_fn`、`dns_resolver` | 签名可能随测试设计调整；生产代码优先注入 `session` |
 | **可选扩展** | `allowed_content_types`、`allowed_hosts`、`on_metric`、`correlation_id` | 行为稳定，但不承诺未来不新增参数 |
 
@@ -1225,6 +1232,19 @@ def redact_url(url: str) -> str:
 * [ ] 回写 SPEC-001 的 R-5 / Q-4 引用 SPEC-002，避免文档矛盾
 * [ ] 全量测试通过并更新 Spec 状态
 
+* [ ] **Phase 5: 库级公共根异常（SPEC-003 驱动）**
+* [ ] `ResultDownloadError` 改为同时继承库级根 `MinerUParserError`（定义于 `mineru_parser/errors.py`），既有子类层次保持不变
+* [ ] 在 `mineru_parser/downloader/__init__.py` 与顶层 `mineru_parser/__init__.py` 导出 `MinerUParserError`
+* [ ] 更新 `downloader/errors.py` 模块说明：保留"不继承 `MinerUError`"，补充"继承库级根 `MinerUParserError`，与客户端 / 提取器两条失败路径互不继承"
+* [ ] 编写继承关系断言测试（AC-8.10）：`issubclass(ResultDownloadError, MinerUParserError)` 为真；且与 `MinerUError` / `ResultExtractionError` 互不继承
+* [ ] 回归既有全部测试，确认 `except ResultDownloadError` 的捕获语义未变
+
+* [ ] **Phase 6: Spec 形态收敛（`docs/specs/CLAUDE.md` §1.6）**
+* [ ] 把 §3.4 下载算法的实现伪码（约 250 行：`resolve` / `_download_once` / `_read_body` / `_iter_body`）改写为**契约条款**：单次尝试的步骤顺序、body 读取的分块方式与预算检查点、不完整响应与终止重定向的判定条件、空响应体分支
+* [ ] 把 §3.6 中 `_is_public_ip` / `canonicalize_host` 的实现改写为**判定规则**（网段清单、IDNA 规范化选项、过渡网段与 zone ID 的处理），保留 `usable_content_length` 作为公共契约
+* [ ] 确认 §3 仅保留契约与示例（接口签名、报文 / 响应示例、时序图、文本流程），不再出现具体实现代码
+* [ ] 改写后逐条复核 AC-1.1 ~ AC-6.13 仍可从 §3 的条款直接判定，不依赖实现代码反推
+
 #### AC 与测试映射
 
 > 当前 Spec 为 In Review，以下为计划测试名；实现完成后在 PR 中补齐实际映射。
@@ -1238,7 +1258,7 @@ def redact_url(url: str) -> str:
 | AC-5.1 ~ AC-5.7 | `test_total_timeout_bounds_call`、`test_read_timeout_retries`、`test_timeout_does_not_return_partial_buffer`、`test_retry_after_exceeds_budget_raises_timeout` |
 | AC-6.1 ~ AC-6.13 | `test_ssrf_blocks_private_ip`、`test_ssrf_blocks_multicast_and_nat64`、`test_ssrf_blocks_mapped_ipv6`、`test_idna_host_canonicalized`、`test_redirect_revalidates_target`、`test_redirect_limit`、`test_https_downgrade_rejected`、`test_cross_origin_drops_sensitive_headers`、`test_allowed_hosts` |
 | AC-7.1 ~ AC-7.7 | `test_content_type_whitelist_exact_and_wildcard`、`test_missing_content_type_rejected`、`test_empty_body_skips_content_type` |
-| AC-8.1 ~ AC-8.9 | `test_session_ownership`、`test_session_with_global_auth_rejected`、`test_injected_dependencies_are_used`、`test_close_is_idempotent` |
+| AC-8.1 ~ AC-8.10 | `test_session_ownership`、`test_session_with_global_auth_rejected`、`test_injected_dependencies_are_used`、`test_close_is_idempotent`、`test_error_hierarchy_shares_root_but_not_siblings` |
 | AC-9.1 ~ AC-9.6 | `test_telemetry_redacts_query`、`test_metric_hook_failure_is_swallowed`、`test_metrics_do_not_include_url`、`test_metrics_emitted_once_in_finally`、`test_exception_cause_does_not_leak_url` |
 
 ---
@@ -1274,6 +1294,7 @@ def redact_url(url: str) -> str:
 > **已闭环（划线/归档）：**
 > * [x] ~~`[Q-0]`：下载器是否应内置解压与入库？~~
 >   * **决策结论**：不内置。下载器只负责网络到 `io.BytesIO`；解压、校验与入库属于下游业务。
+>   * **落地**：解压与内容解析由 **SPEC-003（Result Extractor）** 承担，入口为 `extract_result(stream)`；下载器与提取器通过"调用方显式组合"衔接，两者的失败路径互不继承。
 
 #### 1. 核心架构与契约 (Architecture & Contract)
 
@@ -1318,7 +1339,8 @@ def redact_url(url: str) -> str:
 #### 4. API 细节 (API Details)
 
 * [x] **`[Q-10]`**：是否引入库级共享错误根（如 `MinerUParserError`）？
-  * **结论**：本期不引入。`MinerUError` 与 `ResultDownloadError` 保持独立；若未来需要统一捕获，可新增共享根并让两者继承，向后兼容。
+  * **结论**：**已引入**（见 §3.2 异常体系）。`MinerUError` 与 `ResultDownloadError` 保持**互不继承**，但共同继承库级根 `MinerUParserError`，因此既有捕获语义不变，同时获得"一网打尽"捕获全库失败的能力。引入由 SPEC-003 驱动，属纯加性变更。
+  * **理由**：该变更的成本随组件数量线性增长，且事后重构需改动多个已发布组件的继承链。趁组件数量最少时一次性落地最优。
 * [x] **`[Q-11]`**：`allowed_hosts` 是否支持 `*.example.com` 通配符？
   * **结论**：本期不支持。通配符会扩大 SSRF 面并引入标签匹配歧义；动态 CDN 场景由调用方枚举主机或依赖 `_is_public_ip` 检查。
 * [x] **`[Q-12]`**：`resolve` 是否改名为 `download` / `fetch`？
