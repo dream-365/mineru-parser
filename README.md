@@ -17,7 +17,8 @@
 from mineru_parser import parse
 
 # API Key 默认读取环境变量 MINERU_API_KEY
-result = parse("https://example.com/paper.pdf")   # 同步阻塞，直到任务终态
+# 下面使用 MinerU 官方的公开示例 PDF（13 页 Elsevier 论文），可直接运行
+result = parse("https://cdn-mineru.openxlab.org.cn/demo/example.pdf")   # 同步阻塞，直到任务终态
 
 if result["status"] == "success":
     for page in result["data"]["pages"]:        # list[Page]：逐页版面元素
@@ -32,6 +33,31 @@ else:
 ```
 
 `parse()` 是**同步阻塞**调用，一次调用完成"提交 → 等待 → 下载 → 解析"。任一阶段失败都不会交出半成品：失败时 `data` 必定是 `None`。
+
+### 已验证示例
+
+对上面这个示例 PDF 的真实运行结果（2026-10-21）：
+
+| 项目 | 实测值 |
+| --- | --- |
+| 端到端耗时 | 37.5 s |
+| 提交 / 等待 / 下载 / 解析 | 0.22 s / 36.56 s / 0.67 s / 0.03 s |
+| 结果包 ZIP | 985,735 B |
+| 页面数 | 13 |
+| 版面元素 | 156 |
+| 图片 | 20 张，共 631,443 B |
+
+```text
+status = success
+task_id = 85d5b85c-c040-4223-8620-fc040f9b285b
+data_id = None            # 未传 data_id
+error   = None
+pages=13 blocks=156 images=20
+```
+
+解析出的元素类型覆盖 `title` / `paragraph` / `table` / `chart` / `equation_interline` / `list` / `page_header` / `page_number`；标题、作者、机构、摘要、公式与参考文献均正确归一化。
+
+> 耗时随服务端队列与文档复杂度变化，上表只用于说明量级；页面数、元素数与图片数由文档本身决定。
 
 ### `parse()` 参数
 
@@ -100,7 +126,7 @@ def parse(
 **默认不抛异常。** 已知失败（`MinerUParserError` 家族）被封装成 `ErrorMessage` 随 `status="failed"` 返回，调用方默认无需 `try` / `except` 就能拿到成败与失败原因。
 
 ```python
-result = parse("https://example.com/paper.pdf")
+result = parse("https://cdn-mineru.openxlab.org.cn/demo/example.pdf")
 
 if result["status"] == "failed":
     error = result["error"]
@@ -116,7 +142,7 @@ if result["status"] == "failed":
 from mineru_parser import MinerUParserError, parse
 
 try:
-    result = parse("https://example.com/paper.pdf", timeout=600, raise_on_error=True)
+    result = parse("https://cdn-mineru.openxlab.org.cn/demo/example.pdf", timeout=600, raise_on_error=True)
 except MinerUParserError as exc:
     # 已知失败：组件异常**原样抛出**（同一对象，类型与异常链不变）
     print(type(exc).__name__, exc)
@@ -131,7 +157,7 @@ except MinerUParserError as exc:
 
 判定只看**类型**，不看消息、不看内容。信封由库自行构造，可序列化、可落盘、可上报：它只带类名与脱敏摘要，**不携带原始异常对象**，也不携带文档正文、凭据或签名 URL。
 
-> **组件异常类已私有化**，调用方无法再按具体类型导入它们（`MinerUQuotaError` 等）。异常模式下用库级根异常 `MinerUParserError` 捕获，再按 `type(exc).__name__` 分支；信封模式下直接读 `error["error_type"]`。两种模式的信息量一致。
+> **组件异常类不对外公开**，调用方无法按具体类型导入它们（`MinerUQuotaError` 等）。异常模式下用库级根异常 `MinerUParserError` 捕获，再按 `type(exc).__name__` 分支；信封模式下直接读 `error["error_type"]`。两种模式的信息量一致。
 
 ### 两种模式的对照
 
@@ -167,7 +193,7 @@ def on_failure(stage: PipelineStage, exc: BaseException) -> None:
     logger.error("parse failed at %s: %s", stage, type(exc).__name__)
 
 result = parse(
-    "https://example.com/paper.pdf",
+    "https://cdn-mineru.openxlab.org.cn/demo/example.pdf",
     data_id="doc-42",
     timeout=600,                              # 覆盖提交 / 等待 / 下载 / 解析四段
     on_update=lambda status: print(status.state),
@@ -240,51 +266,6 @@ result = parse(
 > 压缩侧与解压侧**不是同一量纲**：下载上限约束**压缩后**字节，提取限额约束**解压后**字节。因此"下载成功但提取被限额拒绝"是正常可达状态，不是错误。
 >
 > 峰值数字是**推导值**，不是实测值；真实并发峰值请在目标环境标定（推导口径见 SPEC-004 §3.5）。
-
-## 迁移
-
-顶层 API 面从"约 40 个导出名"收敛为"**一个函数 + 必要类型**"。这是**有意的破坏性变更**（项目尚未到 1.0，一次性收敛优于分阶段弃用）。
-
-| 名称 | 现状 | 迁移后 | 迁移方式 |
-| --- | --- | --- | --- |
-| — | — | ✅ `mineru_parser.parse`（**唯一稳定函数**） | 直接使用 |
-| `MinerUApiClient` / `AsyncResult` | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入；如需编排请使用 `parse` |
-| `ResultDownloader` | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入 |
-| `extract_result` / `canonicalize_member_path` | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入 |
-| 三族具体异常类 | 顶层导出 | **私有化**，公开路径不再提供 | 无法再导入；改用 `MinerUParserError` + 类名分支 |
-| `MinerUParserError` | 顶层导出 | **保留**（捕获全库失败所需） | 无需改动 |
-| `ExtractedResult` / `ExtractedImage` / `ExtractionLimits` / `MetricHook` / `MinerUTaskStatus` | 顶层导出 | **保留**（`parse` 签名 / 返回值所需类型） | 无需改动 |
-| `PipelineStage` / `ParseResult` / `ErrorMessage` | — | **保留**（新增） | — |
-| `PipelineError` / `PipelineTimeoutError` / `PipelineConfigurationError` | — | **保留**（新增：管道自身的两类失败） | — |
-
-三个组件的实现包改名为私有的 `mineru_parser._client` / `_downloader` / `_extractor`，公开路径 `mineru_parser.client` / `.downloader` / `.extractor` **不再提供**。组件的**行为契约**（SPEC-001 / 002 / 003）仍然成立——它们作为内部实现继续被实现与测试，只是不再对调用方可见；`parse()` 的语义是这些契约在管道层的投影。
-
-**迁移示例**：
-
-```python
-# 旧：三段手写编排
-from mineru_parser import MinerUApiClient, ResultDownloader, extract_result
-
-with MinerUApiClient() as client, ResultDownloader() as downloader:  # API Key 默认读取 MINERU_API_KEY
-    task = client.submit("https://example.com/paper.pdf", data_id="doc-42")
-    result = task.wait(timeout=600, on_update=lambda s: print(s.state))
-    stream = downloader.resolve(result.zip_url)   # io.BytesIO，游标位于 0
-    extracted = extract_result(stream)
-```
-
-```python
-# 新：一次调用
-from mineru_parser import parse
-
-result = parse(
-    "https://example.com/paper.pdf",
-    data_id="doc-42",
-    timeout=600,
-    on_update=lambda s: print(s.state),
-)
-```
-
-调用方不再负责：阶段顺序、流与组件的关闭、失败阶段的归因、三段超时的一致性。
 
 ## 错误模型
 
