@@ -1,4 +1,27 @@
+---
+type: changelog
+status: Approved
+owner: jackafx
+depends_on: []
+updated_at: 2026-11-09
+---
+
 # Changelog: SPEC-003 Result Extractor
+
+## [2026-11-09] - 规范形态迁移：8 章骨架、frontmatter、目录布局与 tasks.md
+
+- **修改类型**: Changed
+- **影响范围**: 全文结构（目录、frontmatter、章节编号、元数据表、NFR、上线计划、替代方案）；新增 `tasks.md`
+- **变更原因**: 旧版为扁平文件与 6 章模板，无法通过 mdstandards / taskscheck 的形态闸门；Goals 未带验收方式，缺少 NFR、上线与替代方案章节，且 `Approved` 状态缺少必需的 `tasks.md`。
+- **具体内容**:
+  - 迁移为 `docs/specs/SPEC-003-result-extractor/spec.md`，changelog 同目录；新增 `tasks.md`。
+  - 补齐 frontmatter 与正文元数据表；`depends_on` 指向全局架构文档。
+  - 按 8 章骨架重排；Goals 收敛为 G1 ~ G6，每个 Goal 带验收方式与 AC 范围；Non-Goals 逐条标注 `本次不做` / `Deferred to Phase 2`。
+  - 1.2 保留 2026-10-21 真实样本基线（7 成员、manifest 4,803 B、1 页 6 块、图片 13,936 B），并补充默认 `max_total_image_bytes` 与 1 GiB 容器不自洽的证据。
+  - §3.4 / §3.5 / §3.6 的契约表述保留，仅调整章节编号与交叉引用；移除数据模型与 API 段落中的实现代码。
+  - AC 与边界条件表保留原契约，仅调整章节编号。
+- **说明**: 契约（`extract_result` 签名、输出结构、限额默认值、异常体系、路径规则）未改变；仅调整文档形态与证据位置。
+- **状态**: Approved。
 
 ## [2026-10-21] - 随 SPEC-004 同步导出路径：组件转为私有实现
 

@@ -1,4 +1,27 @@
+---
+type: changelog
+status: In Review
+owner: jackafx
+depends_on: []
+updated_at: 2026-11-09
+---
+
 # Changelog: SPEC-002 ResultDownloader
+
+## [2026-11-09] - 规范形态迁移：8 章骨架、frontmatter、目录布局
+
+- **修改类型**: Changed
+- **影响范围**: 全文结构（目录、frontmatter、章节编号、元数据表、NFR、上线计划、替代方案）
+- **变更原因**: 旧版为扁平文件与 6 章模板，无法通过 mdstandards / taskscheck 的形态闸门；背景缺少可核实的痛点证据，Goals 未带验收方式，且缺少 NFR、上线与替代方案章节。
+- **具体内容**:
+  - 迁移为 `docs/specs/SPEC-002-result-downloader/spec.md`，changelog 同目录。
+  - 补齐 frontmatter 与正文元数据表；`depends_on` 指向全局架构文档。
+  - 按 8 章骨架重排；Goals 收敛为 G1 ~ G6，每个 Goal 带验收方式与 AC 范围；Non-Goals 逐条标注 `本次不做` / `Deferred to Phase 2`。
+  - 1.2 补充可核实证据：2026-10-21 代码评审复现的慢速滴流、超时误分类、异常链泄漏签名 URL、IPv6 过渡网段失效四项问题。
+  - §3.4 / §3.5 / §3.6 的实现伪码改写为下载、重试、URL 安全校验的契约条款；不再保留具体实现代码。
+  - AC 与边界条件表保留原契约，仅调整章节编号与交叉引用。
+- **说明**: 契约（`resolve` 签名、限额、可重试状态码、异常体系、SSRF 与重定向规则）未改变；仅调整文档形态与证据位置。
+- **状态**: In Review。
 
 ## [2026-10-21] - 随 SPEC-004 同步导出路径：组件转为私有实现
 
