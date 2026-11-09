@@ -1,5 +1,8 @@
 # mineru-parser
 
+[![PyPI](https://img.shields.io/pypi/v/mineru-parser.svg)](https://pypi.org/project/mineru-parser/)
+[![Python](https://img.shields.io/pypi/pyversions/mineru-parser.svg)](https://pypi.org/project/mineru-parser/)
+
 `mineru-parser` 把 MinerU 的异步文档解析流程封装成一次同步 Python 调用：**输入一个 PDF URI，输出一个 `ParseResult`**——包含解析产物、任务元数据与失败原因的状态信封。
 
 一次调用跨越四个阶段，阶段顺序、参数透传、资源生命周期与端到端预算全部由库负责：
@@ -10,6 +13,14 @@
 | ② 等待 | client | `task_id` | `zip_url` |
 | ③ 下载 | downloader | `zip_url` | `io.BytesIO`（ZIP 内存流） |
 | ④ 解析 | extractor | ZIP 内存流 | `ExtractedResult`（`{pages, images}`） |
+
+## 安装
+
+```bash
+pip install mineru-parser
+```
+
+要求 Python 3.12 及以上。使用 uv 的项目也可以执行 `uv add mineru-parser`。
 
 ## 快速开始
 

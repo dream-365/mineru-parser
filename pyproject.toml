@@ -4,10 +4,28 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mineru-parser"
-version = "0.1.0"
+dynamic = ["version"]
 description = "One-call MinerU document parsing: submit, wait, download and extract"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "代码与咖啡渍", email = "14042413+jackafx@user.noreply.gitee.com" },
+]
+keywords = ["mineru", "pdf", "document-parsing", "ocr", "layout-analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing",
+]
 dependencies = [
     "idna>=3.7",
     "pydantic>=2.9",
@@ -15,8 +33,16 @@ dependencies = [
     "urllib3>=2.2",
 ]
 
+[project.urls]
+Homepage = "https://github.com/dream-365/mineru-parser"
+Repository = "https://github.com/dream-365/mineru-parser"
+Issues = "https://github.com/dream-365/mineru-parser/issues"
+
 [dependency-groups]
 dev = ["hypothesis>=6.100", "pytest>=8.3"]
+
+[tool.hatch.version]
+path = "src/mineru_parser/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mineru_parser"]
