@@ -1,0 +1,670 @@
+{
+  "schema_version": 1,
+  "rubric_version": "1.1.0",
+  "rubric_sha256": "1e6c4740ed85512b1657e6798e481c893fe015f4ce2a140665ff6ecb2ef7b29e",
+  "target": "docs/specs/SPEC-003-result-extractor/spec.md",
+  "target_sha256": "a5a4fc8152a2861af1971d5194d3d33adb5c1353a50cc8821dbfc80c6a14f0fa",
+  "reviewer": {
+    "role": "independent",
+    "model": "sonnet",
+    "session_id": "review-spec-003",
+    "started_at": "2026-11-09T00:00:00Z"
+  },
+  "items": [
+    {
+      "id": "bg.current_state",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "1.1 系统现状",
+          "quote": "`mineru-parser` 的四阶段链路中，提取器是第四阶段：下载器交付 `io.BytesIO` 后，提取器把 ZIP 结果包解析为 `{\"pages\": [...], \"images\": [...]}`。上游是结果包内存流，下游是需要“页面 + 图片”的业务后端、渲染与检索入库。"
+        },
+        {
+          "section": "1.1 系统现状",
+          "quote": "当前技术栈为 Python 3.12、`zipfile`、`json`、Pydantic v2。组件是**无状态、纯内存**的解析函数：不下载、不重试、不落盘、不解码图片。组件已随 SPEC-004 私有化为 `mineru_parser._extractor`；外部用户通过 `parse()` 间接使用，行为契约仍由本文约束。"
+        }
+      ],
+      "rationale": "Section 1.1 states the extractor is stage 4 of the four-stage pipeline, names the upstream memory stream and downstream page/image consumers, describes the pure in-memory flow, and gives the Python 3.12 / zipfile / json / Pydantic v2 stack.",
+      "missing": ""
+    },
+    {
+      "id": "bg.failure_chain",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "1.2 核心技术痛点",
+          "quote": "结果包不是“一个正常 ZIP”那么简单；失败链如下：\n\n1. **manifest 定位不一致**：文件名依赖源文档名，约定位于 ZIP 顶层目录；子目录残留、同名 / 多份 manifest、macOS 资源分叉、错误页 ZIP 都会让“取第一个匹配文件”的脚本悄悄读到错误内容。\n2. **Schema 校验缺失**：直接用 `dict[\"content\"]` 取值时，字段缺失、块类型漂移与 `bbox` 非法要等到业务深处才暴露；错误信息也缺少字段路径。\n3. **图片处理分散**：路径大小写、重复成员、`..` 路径、符号链接、缺失 `images/` 目录各自处理；排序不确定，调用方难以做稳定快照。\n4. **资源边界缺失**：下载器的 `max_bytes` 只约束压缩字节，不约束解压后的 manifest 与图片；压缩炸弹或超大图片仍可在解压阶段把进程内存打满。\n5. **错误不可分类**：`BadZipFile`、`UnicodeDecodeError`、Pydantic `ValidationError`、`KeyError` 混杂在一起，调用方无法区分“包坏了”“格式变了”“图片超限”，也无法决定是否值得重新下载。"
+        }
+      ],
+      "rationale": "A numbered five-step failure chain runs from manifest mis-location through missing Schema validation, scattered image handling, absent resource bounds, to unclassifiable errors, each with trigger and consequence.",
+      "missing": ""
+    },
+    {
+      "id": "bg.trigger",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "1.3 重构/设计动机",
+          "quote": "1. **提取器成为每条 `parse()` 调用的最后一段**：SPEC-004 落地后，提取失败会直接表现为管道第 4 阶段失败；契约需要在 0.1.0 发布前固化。\n2. **资源预算需要与部署形态对齐**：单次调用峰值约 240 MiB、$W=4$ 时约 960 MiB；默认限额必须能据此自洽推导，而不是拍脑袋。\n3. **三条失败路径需要共享根异常**：客户端、下载器、提取器的异常互不继承，但调用方需要统一捕获入口；`MinerUParserError` 是本期触发点之一。\n4. **下游需要与提取器一致的路径规则**：manifest 中的图片引用是上游原始字符串，必须用同一套 canonical 规则归一；否则下游无法稳定匹配图片。"
+        }
+      ],
+      "rationale": "Section 1.3 gives concrete current triggers: SPEC-004 makes extraction the final stage of every parse() call, the resource budget must be aligned before 0.1.0, and the shared root exception is a this-cycle trigger.",
+      "missing": ""
+    },
+    {
+      "id": "bg.non_goals",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "1.4 非目标",
+          "quote": "- **下载、重试、URL 校验、SSRF 防护**：本次不做；属于上游下载组件。\n- **解压到磁盘、临时文件、`extract()` / `extractall()`、ZIP 成员权限恢复**：本次不做。\n- **解析 `content_list.json`（v1）、`middle.json`、`model.json`、Markdown 或其他结果文件**：本次不做。\n- **图片解码、格式嗅探、缩略图、OCR、内容哈希或损坏图片检测**：本次不做。\n- **manifest 中 `image_source.path` 与 `images` 列表的交叉校验**：本次不做；缺失引用与未引用图片均不报错。\n- **按内容去重相同图片**：本次不做；每个路径一条记录。\n- **流式 / 懒加载解析**：本次不做；整份 manifest 与全部图片一次性载入内存。\n- **批量结果包、多个 ZIP 合并、跨包去重**：本次不做。\n- **阅读顺序重建、跨页合并、版面块重排**：本次不做。\n- **ZIP 来源、签名、哈希校验**：本次不做；只校验结构与资源边界。\n- **非 seekable 流的缓冲**：本次不做；调用方需自行转为 `io.BytesIO`。\n- **`ResultExtractor` 类门面**：本次不做；当前提供无状态函数。\n- **修改 `schema/content_v2.py` 或开启 `strict=True` / `extra=\"forbid\"`**：本次不做。\n- **JSON 重复键检测**：本次不做；解析器按“后值覆盖前值”处理。\n- **绕开 `zipfile` 自行实现成员解压**：本次不做；完整性校验交由下游。"
+        },
+        {
+          "section": "1.4 非目标",
+          "quote": "**不做的后果**：不做图片解码与哈希校验意味着恶意图片载荷的防护属于下游渲染器；不做交叉校验意味着调用方必须自行判断引用缺失；不落盘意味着解码后的 manifest 与图片全部驻留内存，峰值受 §4.3 的限额约束。以上代价已写入第 5 章与第 7 章。"
+        }
+      ],
+      "rationale": "Fifteen explicit non-goals are listed, followed by a paragraph stating the consequences of not doing them (downstream-only decoding, caller-side reference checks, full in-memory residency).",
+      "missing": ""
+    },
+    {
+      "id": "bg.pain_evidence",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "1.2 核心技术痛点",
+          "quote": "**证据（度量）**：2026-10-21 用最小真实结果包核对，ZIP 共 7 个成员（`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`）。manifest 4,803 B，1 页、6 个块（TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；图片 1 张、13,936 B。该样本确认了“根目录 manifest + 根 `images/`”布局，也暴露了原默认 `max_total_image_bytes=256 MiB` 与 1 GiB 容器、$W=4$ 的部署形态不自洽：同一形态下峰值约 1,272 MiB，超过容器上限；据此下调为 160 MiB（见 §4.3 与 Q-23）。"
+        }
+      ],
+      "rationale": "A dated (2026-10-21) measurement of a real result package gives member count, manifest bytes, page/block counts and image bytes, and directly ties the sample to the resource-bound failure by showing 1,272 MiB peak against a 1 GiB container.",
+      "missing": ""
+    },
+    {
+      "id": "goal.verifiable",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "2.1 目标",
+          "quote": "- **G1 - 统一入口与结果契约（架构级）**：`extract_result(stream) -> ExtractedResult` 是唯一入口；每次返回新的 `{pages, images}`，失败不返回部分结果。验收：AC-1.1 ~ AC-1.11。\n- **G2 - manifest 唯一发现与 Schema 校验（可靠性级）**：只在 ZIP 顶层定位唯一 `*_content_list_v2.json`；缺失或多份均失败关闭；Pydantic 校验携带字段路径且不泄漏正文。验收：AC-2.1 ~ AC-3.10。\n- **G3 - 图片提取与路径规则（架构级）**：提取顶层 `images/` 全部常规文件；canonical path、去重、字典序排序；公开 `canonicalize_member_path`。验收：AC-4.1 ~ AC-4.14。\n- **G4 - 资源限额与错误分类（性能 / 可靠性级）**：默认 manifest 16 MiB、单图 32 MiB、总图片 160 MiB、图片 10,000 张、成员 100,000；超限不返回部分结果。验收：AC-5.1 ~ AC-6.9。\n- **G5 - 流生命周期、遥测与可测试性（运维级）**：不关闭调用方流、成功 / 失败后恢复游标；日志 / 指标统一出口；纯函数、无网络、可用内存 ZIP 测试。验收：AC-7.1 ~ AC-7.7。\n- **G6 - 共享根异常与公开路径规则（架构级）**：`ResultExtractionError` 继承 `MinerUParserError` 且与其他失败家族互不继承；`canonicalize_member_path` 对外可用。验收：AC-6.1、AC-1.11、AC-4.13。"
+        }
+      ],
+      "rationale": "Every one of G1-G6 ends with an explicit acceptance reference (AC ranges, a specific AC list, or named tests), so each goal has a verification path.",
+      "missing": ""
+    },
+    {
+      "id": "goal.quantified",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "2.1 目标",
+          "quote": "- **G4 - 资源限额与错误分类（性能 / 可靠性级）**：默认 manifest 16 MiB、单图 32 MiB、总图片 160 MiB、图片 10,000 张、成员 100,000；超限不返回部分结果。验收：AC-5.1 ~ AC-6.9。"
+        }
+      ],
+      "rationale": "G4 fixes numeric limits with units: manifest 16 MiB, single image 32 MiB, total images 160 MiB, 10,000 images, 100,000 members.",
+      "missing": ""
+    },
+    {
+      "id": "goal.count",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "2.1 目标",
+          "quote": "- **G1 - 统一入口与结果契约（架构级）**：`extract_result(stream) -> ExtractedResult` 是唯一入口；每次返回新的 `{pages, images}`，失败不返回部分结果。验收：AC-1.1 ~ AC-1.11。\n- **G2 - manifest 唯一发现与 Schema 校验（可靠性级）**：只在 ZIP 顶层定位唯一 `*_content_list_v2.json`；缺失或多份均失败关闭；Pydantic 校验携带字段路径且不泄漏正文。验收：AC-2.1 ~ AC-3.10。\n- **G3 - 图片提取与路径规则（架构级）**：提取顶层 `images/` 全部常规文件；canonical path、去重、字典序排序；公开 `canonicalize_member_path`。验收：AC-4.1 ~ AC-4.14。\n- **G4 - 资源限额与错误分类（性能 / 可靠性级）**：默认 manifest 16 MiB、单图 32 MiB、总图片 160 MiB、图片 10,000 张、成员 100,000；超限不返回部分结果。验收：AC-5.1 ~ AC-6.9。\n- **G5 - 流生命周期、遥测与可测试性（运维级）**：不关闭调用方流、成功 / 失败后恢复游标；日志 / 指标统一出口；纯函数、无网络、可用内存 ZIP 测试。验收：AC-7.1 ~ AC-7.7。\n- **G6 - 共享根异常与公开路径规则（架构级）**：`ResultExtractionError` 继承 `MinerUParserError` 且与其他失败家族互不继承；`canonicalize_member_path` 对外可用。验收：AC-6.1、AC-1.11、AC-4.13。"
+        }
+      ],
+      "rationale": "Exactly six goals (G1-G6), within the 3-6 range, and each is labelled with a category such as 架构级, 可靠性级, 性能 / 可靠性级 or 运维级.",
+      "missing": ""
+    },
+    {
+      "id": "nongoal.labeled",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "2.2 非目标",
+          "quote": "- **NG1 - 下载、重试、URL 校验、SSRF 防护**：属于下载器（本次不做）。\n- **NG2 - 解压到磁盘 / 临时文件 / 权限恢复**：只在内存读取（本次不做）。\n- **NG3 - 解析其他结果文件**：只面向 `content_list_v2`（本次不做）。\n- **NG4 - 图片解码 / 哈希 / 损坏检测**：下游负责（本次不做）。\n- **NG5 - manifest 与图片交叉校验**：当前不做（本次不做）。\n- **NG6 - 图片内容去重**：每个路径一条记录（本次不做）。\n- **NG7 - 流式 / 懒加载解析**：整份一次性载入（本次不做）。\n- **NG8 - 批量 / 多 ZIP / 跨包去重**：当前不做（本次不做）。\n- **NG9 - 阅读顺序重建 / 跨页合并**：当前不做（本次不做）。\n- **NG10 - ZIP 来源 / 签名 / 哈希校验**：只校验结构与资源边界（本次不做）。\n- **NG11 - 非 seekable 流缓冲**：调用方先转 `io.BytesIO`（本次不做）。\n- **NG12 - 类门面 / 严格 Schema 模式 / 重复键检测 / 自建 ZIP 解析**：留待后续评估（Deferred to Phase 2）。\n- **NG13 - 自定义 `max_total_image_bytes` 之外的部署级内存隔离**：由部署方控制并发度（Deferred to Phase 2）。"
+        }
+      ],
+      "rationale": "All thirteen non-goals NG1-NG13 are explicitly tagged either 本次不做 or Deferred to Phase 2.",
+      "missing": ""
+    },
+    {
+      "id": "nongoal.not_dumping_ground",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "2.2 非目标",
+          "quote": "- **NG1 - 下载、重试、URL 校验、SSRF 防护**：属于下载器（本次不做）。"
+        },
+        {
+          "section": "2.2 非目标",
+          "quote": "- **NG12 - 类门面 / 严格 Schema 模式 / 重复键检测 / 自建 ZIP 解析**：留待后续评估（Deferred to Phase 2）。"
+        }
+      ],
+      "rationale": "Each non-goal maps to a stated pain point or boundary (downloads/retry to the downloader, disk extraction to the memory-only constraint, image decoding to downstream, etc.), and section 1.4 states the cost of omission.",
+      "missing": ""
+    },
+    {
+      "id": "arch.solution_shape",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "3. 架构设计与核心方案",
+          "quote": "    PIPE[\"pipeline.parse\"] --> EX[\"extract_result(stream)\"]\n    EX --> ZIP[\"ZipFile 只读\"]\n    ZIP --> DISC[\"Manifest Discovery<br/>顶层唯一匹配\"]\n    ZIP --> IMG[\"Image Collector<br/>顶层 images/\"]\n    DISC --> VAL[\"Schema Validation<br/>TypeAdapter\"]\n    IMG --> LIM[\"Limits / Bounded Read\"]\n    VAL --> OUT[\"{pages, images}\"]\n    LIM --> OUT\n    EX --> TEL[\"Telemetry\"]"
+        },
+        {
+          "section": "3. 架构设计与核心方案",
+          "quote": "1. `extract_result(stream)` 校验流可读 / 可 seek 与 `limits` / hooks 参数；记录初始游标。\n2. 以只读模式打开 `ZipFile`；EOCD 前置预检按中央目录大小推导成员数上界，超限在构造 `ZipFile` 前拒绝。\n3. 在 ZIP 顶层定位唯一 `*_content_list_v2.json`；缺失、多份或非法成员名分别失败关闭。\n4. 有界读取 manifest，UTF-8（可选 BOM）解码，JSON 解析，`TypeAdapter(DocumentContentSchema)` 校验；错误清洗后抛出公共异常。\n5. 收集顶层 `images/` 下的常规文件；canonical path 去重、字典序排序；按声明大小与累计字节双重限额有界读取。\n6. 返回 `{pages, images}`；成功与已处理失败后恢复流游标；任何失败都不返回部分结果。"
+        }
+      ],
+      "rationale": "Chapter 3 contains a change-scoped topology diagram (pipeline.parse -> extract_result -> ZipFile/manifest/images -> output/telemetry) and a six-step module/data-flow description.",
+      "missing": ""
+    },
+    {
+      "id": "arch.topology",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "3.1 总体架构",
+          "quote": "全局结构见 [全局架构](../../architecture/mineru-parser-architecture.md)（Approved）。提取器位于管道第 4 阶段，上游是下载器交付的内存 ZIP 流，下游是 `ParseResult.data`。"
+        },
+        {
+          "section": "3.2 核心模块职责",
+          "quote": "| `extract_result` | 参数 / 流校验、编排、流游标恢复、遥测收尾 | 不下载、不重试、不落盘 |"
+        }
+      ],
+      "rationale": "The topology diagram is paired with a module responsibility table that gives each module (extract_result, Manifest Discovery, Schema Validation, Image Collector, Limits, Telemetry) a one-line duty plus an explicit non-duty.",
+      "missing": ""
+    },
+    {
+      "id": "arch.change_set",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "3. 架构设计与核心方案",
+          "quote": "- 新增：`MinerUParserError` 根异常在提取器侧的继承关系与断言；公开 `canonicalize_member_path`。\n- 改造：实现伪码收敛为契约条款；明确 EOCD 前置预检、manifest 唯一发现与资源限额的判定顺序。\n- 不变：`extract_result` 签名、输出结构、异常体系、限额默认值（`max_total_image_bytes=160 MiB`）。"
+        }
+      ],
+      "rationale": "Explicit 新增 / 改造 / 保持不变 bullets state the changed set and what stays fixed.",
+      "missing": ""
+    },
+    {
+      "id": "arch.rationale",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "3.4 关键选型与约束",
+          "quote": "- **`zipfile` 只读 + 有界读取**：不自行实现解压，不落盘，不调用 `extract()` / `extractall()`。\n- **Pydantic v2 `TypeAdapter`**：复用现有 `content_v2` Schema，提供字段路径与错误分类；不开启 strict。\n- **顶层唯一 manifest**：不猜测、不回退、不合并；多份即 `ambiguous`。\n- **输出普通 dict + `TypedDict`**：与调用方约定一致；Pydantic 模型只用于页面内容。\n- **资源限额显式化**：限额不是孤立数字，必须与部署形态（$W$、容器内存）共同推导；详细对比见第 7 章。"
+        }
+      ],
+      "rationale": "Section 3.4 gives reasons for zipfile read-only bounded reads, Pydantic TypeAdapter, unique top-level manifest, plain dict output and explicit limits, and points the detailed comparison to chapter 7.",
+      "missing": ""
+    },
+    {
+      "id": "arch.references_source",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "3. 架构设计与核心方案",
+          "quote": "全局结构见 [全局架构](../../architecture/mineru-parser-architecture.md)（Approved）。提取器位于管道第 4 阶段，上游是下载器交付的内存 ZIP 流，下游是 `ParseResult.data`。\n\n本次变更范围内的拓扑："
+        }
+      ],
+      "rationale": "Frontmatter depends_on names docs/architecture/mineru-parser-architecture.md; section 3.1 references that document for the global structure and explicitly confines this chapter to the extractor change-scope topology.",
+      "missing": ""
+    },
+    {
+      "id": "design.contract",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "4. 详细设计",
+          "quote": "| 字段 | 默认值 | 类型 | 必填 | 约束 / 作用 |\n| :--- | :--- | :--- | :---: | :--- |\n| `max_manifest_bytes` | 16 MiB | `int` | 否 | 正整数，拒绝 `bool`；manifest 解压后字节上限 |\n| `max_image_bytes` | 32 MiB | `int` | 否 | 正整数；单张图片解压后字节上限 |\n| `max_total_image_bytes` | 160 MiB | `int` | 否 | 正整数；全部图片解压后总字节上限 |\n| `max_images` | 10,000 | `int` | 否 | 正整数；图片文件数量上限 |\n| `max_members` | 100,000 | `int` | 否 | 正整数；ZIP 中央目录成员总数上限 |"
+        },
+        {
+          "section": "4. 详细设计",
+          "quote": "| 成员 | 签名 / 取值 | 语义 |\n| :--- | :--- | :--- |\n| `extract_result` | `extract_result(stream: BinaryIO, *, limits: ExtractionLimits \\| None = None, on_metric: MetricHook \\| None = None, correlation_id: str \\| None = None) -> ExtractedResult` | 同步纯函数；成功返回新 dict；失败不返回部分结果 |\n| `canonicalize_member_path` | `canonicalize_member_path(raw: str) -> str \\| None` | 与内部实现共用同一份规则；非法路径返回 `None` |"
+        }
+      ],
+      "rationale": "Section 4.3 provides the ExtractionLimits field table and output structure, and section 4.4 provides concrete API signatures.",
+      "missing": ""
+    },
+    {
+      "id": "design.data_model",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "4.3 数据模型与契约",
+          "quote": "| 字段 | 默认值 | 类型 | 必填 | 约束 / 作用 |\n| :--- | :--- | :--- | :---: | :--- |\n| `max_manifest_bytes` | 16 MiB | `int` | 否 | 正整数，拒绝 `bool`；manifest 解压后字节上限 |\n| `max_image_bytes` | 32 MiB | `int` | 否 | 正整数；单张图片解压后字节上限 |\n| `max_total_image_bytes` | 160 MiB | `int` | 否 | 正整数；全部图片解压后总字节上限 |\n| `max_images` | 10,000 | `int` | 否 | 正整数；图片文件数量上限 |\n| `max_members` | 100,000 | `int` | 否 | 正整数；ZIP 中央目录成员总数上限 |"
+        },
+        {
+          "section": "4.3 数据模型与契约",
+          "quote": "任一字段非法时抛 `ResultExtractionConfigurationError(field=<字段名>)`，且报错指明第一个不合法字段；`None` 只表示使用默认值，不表示无限制。"
+        }
+      ],
+      "rationale": "The ExtractionLimits table gives field, default, type, required flag and validation/role, the output table gives field types, and construction-time validation is stated.",
+      "missing": ""
+    },
+    {
+      "id": "design.interface",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "4.4 接口与协议",
+          "quote": "| 成员 | 签名 / 取值 | 语义 |\n| :--- | :--- | :--- |\n| `extract_result` | `extract_result(stream: BinaryIO, *, limits: ExtractionLimits \\| None = None, on_metric: MetricHook \\| None = None, correlation_id: str \\| None = None) -> ExtractedResult` | 同步纯函数；成功返回新 dict；失败不返回部分结果 |\n| `canonicalize_member_path` | `canonicalize_member_path(raw: str) -> str \\| None` | 与内部实现共用同一份规则；非法路径返回 `None` |"
+        },
+        {
+          "section": "4.4 接口与协议",
+          "quote": "1. **只读**：只调用 `read` / `seek` / `tell`，不得写入或截断流。\n2. **所有权**：调用方拥有流；返回后不持有引用，绝不调用 `close()`。\n3. **游标**：成功与已处理失败后恢复到调用前位置；恢复失败只记录警告，不改变主结果。\n4. **可 seek**：非 seekable 流直接拒绝；调用方可先写入 `io.BytesIO`。\n5. **并发**：不同流上的并发调用安全；同一个流的并发调用不受支持。"
+        }
+      ],
+      "rationale": "Section 4.4 gives full signatures for extract_result and canonicalize_member_path, the export surface, stream lifecycle rules and the return contract.",
+      "missing": ""
+    },
+    {
+      "id": "design.sequence",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "4.5 核心流程与时序",
+          "quote": "sequenceDiagram\n    autonumber\n    participant P as pipeline.parse\n    participant E as extract_result\n    participant Z as ZipFile\n    participant S as Schema\n    participant I as Image Collector\n\n    P->>E: extract_result(stream, limits)\n    E->>E: 校验流 / limits / hooks\n    E->>Z: 只读打开 + EOCD 预检\n    E->>Z: 定位顶层唯一 manifest\n    E->>S: 读取 + JSON + TypeAdapter 校验\n    E->>I: 收集顶层 images/ 并限额读取\n    I-->>E: images（canonical path 升序）\n    E-->>P: {pages, images}\n    Note over E: 任何失败都不返回部分结果；恢复流游标"
+        },
+        {
+          "section": "4.5 核心流程与时序",
+          "quote": "| #   | 阶段          | 动作                                               | 失败结果                                                                                                                   | 依据                |\n| :---: | :----------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------- | :----------------- |\n| 1   | 遥测构造        | 校验 `on_metric` / `correlation_id`，构造 `Telemetry` | `ConfigurationError(field=\"on_metric\" / \"correlation_id\")`                                                             | AC-6.6 / AC-6.7   |\n| 2   | 限额解析        | `limits=None` 取默认值；否则校验类型                        | `ConfigurationError(field=\"limits\")`                                                                                   | AC-1.7            |\n| 3   | 流校验         | 校验二进制、可读、可 seek；记录起始游标                           | `ConfigurationError(field=\"stream\")`                                                                                   | AC-1.6            |\n| 4   | 成员数预检       | 读 EOCD，按条目数上界公式判定，超限立即拒绝（尚未打开归档）                 | `LimitError(resource=\"member_count\")`                                                                                  | AC-5.9            |\n| 5   | 打开归档        | 只读模式打开 ZIP，解析中央目录                                | `ArchiveError(reason=\"invalid_zip\")`                                                                                   | AC-5.1            |\n| 6   | 成员数复核       | 中央目录条目数超限则拒绝                                     | `LimitError(resource=\"member_count\")`                                                                                  | AC-5.9            |\n| 7   | manifest 发现 | 定位唯一顶层候选（不读数据）                                   | `ManifestError(reason=\"not_found\" / \"ambiguous\")`、`ArchiveError(reason=\"unsafe_member\")`                               | AC-2.1 \\~ AC-2.8  |\n| 8   | manifest 读取 | 有界读取并校验读取长度与声明一致                                 | `LimitError(resource=\"manifest\")`、`ArchiveError(reason=...)`                                                           | AC-3.1 / AC-3.2   |\n| 9   | manifest 解析 | UTF-8 解码 → JSON 解析 → Schema 校验                   | `ManifestError(reason=\"invalid_encoding\" / \"invalid_json\")`、`ValidationError`                                          | AC-3.3 \\~ AC-3.5  |\n| 10  | 图片发现        | 过滤、去重、数量与声明总量预检                                  | `ArchiveError(reason=\"duplicate_member\" / \"unsafe_member\")`、`LimitError(resource=\"image_count\" / \"total_image_bytes\")` | AC-4.1 \\~ AC-4.13 |\n| 11  | 图片读取        | 逐张有界读取并校验读取长度与声明一致                               | `LimitError(resource=\"image\")`、`ArchiveError(reason=...)`                                                              | AC-4.9 / AC-4.12  |\n| 12  | 交付          | 组装 `{\"pages\", \"images\"}`                         | —                                                                                                                      | AC-1.2 / AC-1.3   |\n| 13  | 收尾          | 恢复游标；上报一次指标                                      | 恢复失败仅告警，不改变主结果                                                                                                         | AC-1.5 / AC-6.6   |"
+        }
+      ],
+      "rationale": "Section 4.5 has a sequence diagram plus a 13-stage orchestration table whose failure column covers exception paths, with ordering notes for telemetry and the EOCD pre-check.",
+      "missing": ""
+    },
+    {
+      "id": "design.errors",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "4.6 异常处理与错误码",
+          "quote": "- `json_invalid` 覆盖 JSON 语法错误、尾随数据**与解析器递归上限**（深层嵌套 JSON 在此归类；本 Spec 不设独立的 `too_deep` 原因，见 AC-3.4）。UTF-8 编码错误已在前面单独处理。"
+        },
+        {
+          "section": "4.6 异常处理与错误码",
+          "quote": "- 校验失败与非法 JSON / 编码错误必须使原始 `ValidationError` 既不成为显式 `__cause__`，也不出现在 `__context__` 中（AC-6.4）。"
+        }
+      ],
+      "rationale": "Section 4.3 defines the exception hierarchy with attached fields, and section 4.6 gives a stage-by-stage table mapping each error situation to a concrete exception.",
+      "missing": ""
+    },
+    {
+      "id": "nfr.measurable",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **限额**：manifest 16 MiB、单图 32 MiB、总图片 160 MiB、图片 10,000 张、成员 100,000；任一超限失败关闭。验收：AC-5.1 ~ AC-5.10。\n- **单次调用峰值内存**：约 240 MiB；$W=4$ 时约 960 MiB，不超过 1 GiB 容器。该数字为公式推导值，标 **[estimated]**（$k_{\\text{model}}$ 待 `tracemalloc` 标定后回写）。验收：`test_memory_bound_with_tracemalloc`。\n- **确定性**：相同字节 + 相同 `limits` 产生等价结果；图片按 canonical path 升序。验收：AC-7.3。\n- **无磁盘 IO**：不调用 `extract()` / `extractall()`，不写临时文件。验收：AC-5.9。"
+        },
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **失败关闭**：manifest 缺失 / 多份 / Schema 不符 / 成员不安全 / 超限均整体失败，不返回部分结果。验收：AC-1.4、AC-2.1 ~ AC-2.8、AC-5.x。\n- **流生命周期**：不关闭调用方流；成功与已处理失败后恢复游标；恢复失败只记日志。验收：AC-1.5 ~ AC-1.7。\n- **无重试**：解析失败是终态；调用方可重新下载后再次调用。验收：接口契约第 8 条。\n- **限额独立性**：`max_image_bytes` 与 `max_total_image_bytes` 独立生效；单图合格但累计超限仍失败。验收：AC-5.2。"
+        },
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **日志**：`mineru.extract`（成功）、`mineru.extract.error`（终态失败）、`mineru.metric.failed`；`correlation_id` 附加到所有日志。验收：AC-6.7、AC-6.8。\n- **指标**：成功 / 失败 / 耗时 / 字节 / 图片数等低基数指标；标签取自封闭枚举（`outcome`、`resource`、`category`）。验收：AC-6.7、AC-6.8。\n- **脱敏**：错误消息不泄漏文档正文；Pydantic `msg` 中的内嵌输入值替换为固定文案。验收：AC-3.9、AC-6.4、AC-7.7。\n- **回调隔离**：`on_metric` 异常被吞掉并记录 `mineru.metric.failed`。验收：AC-6.7。"
+        },
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **不可信 ZIP**：成员名、数量、声明大小、压缩方法、加密标志均按不可信处理；拒绝不安全成员与重复成员。验收：AC-2.6、AC-4.4 ~ AC-4.7、AC-5.5。\n- **路径安全**：canonical path 拒绝 `..`、绝对路径、反斜杠、控制字符；下游仍需做目标目录约束。验收：AC-4.4、AC-4.6。\n- **资源边界**：有界读取 + 解压后限额 + 成员数预检，避免压缩炸弹与中央目录内存放大。验收：AC-5.1 ~ AC-5.10。\n- **信息泄漏**：Pydantic 错误清洗、`msg` 二次脱敏、异常不携带正文。验收：AC-3.9、AC-6.4、AC-7.7。\n- **残余风险**：`zipfile` / `zlib` 实现漏洞、敌意归档谎报 `file_size` 造成静默截断；已在 §4.3 与附录登记。"
+        }
+      ],
+      "rationale": "Every chapter-5 bullet carries numbers/units and an explicit acceptance reference (AC-5.x, AC-7.3, AC-1.5~AC-1.7, AC-6.7/6.8).",
+      "missing": ""
+    },
+    {
+      "id": "nfr.coverage",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **限额**：manifest 16 MiB、单图 32 MiB、总图片 160 MiB、图片 10,000 张、成员 100,000；任一超限失败关闭。验收：AC-5.1 ~ AC-5.10。"
+        },
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **失败关闭**：manifest 缺失 / 多份 / Schema 不符 / 成员不安全 / 超限均整体失败，不返回部分结果。验收：AC-1.4、AC-2.1 ~ AC-2.8、AC-5.x。"
+        },
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **日志**：`mineru.extract`（成功）、`mineru.extract.error`（终态失败）、`mineru.metric.failed`；`correlation_id` 附加到所有日志。验收：AC-6.7、AC-6.8。"
+        },
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **不可信 ZIP**：成员名、数量、声明大小、压缩方法、加密标志均按不可信处理；拒绝不安全成员与重复成员。验收：AC-2.6、AC-4.4 ~ AC-4.7、AC-5.5。"
+        }
+      ],
+      "rationale": "Chapter 5 covers performance/resources (5.1), reliability (5.2), observability (5.3) and security/compliance (5.4).",
+      "missing": ""
+    },
+    {
+      "id": "nfr.honesty",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "5. 非功能性需求",
+          "quote": "- **单次调用峰值内存**：约 240 MiB；$W=4$ 时约 960 MiB，不超过 1 GiB 容器。该数字为公式推导值，标 **[estimated]**（$k_{\\text{model}}$ 待 `tracemalloc` 标定后回写）。验收：`test_memory_bound_with_tracemalloc`。"
+        }
+      ],
+      "rationale": "The derived 240 MiB / 960 MiB peak-memory figure is explicitly marked [estimated], with the uncalibrated k_model and the tracemalloc follow-up named.",
+      "missing": ""
+    },
+    {
+      "id": "rollout.release",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "6.1 发布与灰度",
+          "quote": "提取器随 `mineru-parser` 包发布，采用“候选版 → 正式版”两阶段：\n\n1. **Phase 1（候选）**：发布 `0.1.0rcN`；在真实 `tests/data/result_001.zip` 与 80 个提取器测试函数（76 个主测试 + 4 个性质测试）上验证；观察 7 天。\n2. **Phase 2（正式）**：无 P0/P1 问题后发布 `0.1.0`。\n3. **观察期**：发布后 14 天；资源超限或安全回归按 6.4 回滚。"
+        },
+        {
+          "section": "6.1 发布与灰度",
+          "quote": "库形态无法按流量比例灰度；以候选版与真实样本验证替代。[estimated] 观察窗口按当前维护者规模设定。"
+        }
+      ],
+      "rationale": "A two-phase rcN -> 0.1.0 release is defined with a 7-day observation, a 14-day post-release window, and the observation window itself marked [estimated].",
+      "missing": ""
+    },
+    {
+      "id": "rollout.migration",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "6.2 数据迁移与兼容性",
+          "quote": "- **无数据迁移**：提取器不落盘、不缓存；输出为本次调用的新对象。\n- **兼容性**：组件已私有化；外部用户通过 `parse()` 使用；输出键名与类型不变。\n- **内部迁移**：导入路径统一为 `mineru_parser._extractor`；顶层只保留 `ExtractedResult` / `ExtractedImage` / `ExtractionLimits`。\n- **Schema 兼容**：不修改 `content_v2` Schema；上游新增块类型时按 `unknown_block_type` 失败关闭并回写 Schema。"
+        }
+      ],
+      "rationale": "States no data migration (no disk/cache), compatibility through parse(), the internal import-path migration, and Schema compatibility.",
+      "missing": ""
+    },
+    {
+      "id": "rollout.smoke",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "6.3 上线验证与冒烟",
+          "quote": "| 冒烟项 | 步骤 | 观察指标 |\n| :--- | :--- | :--- |\n| 单元回归 | `python -m pytest tests/test_extractor.py -q` | 76 个测试函数全通过 |\n| 性质测试 | `python -m pytest tests/test_extractor_property.py -q` | 4 个 Hypothesis 测试函数全通过 |\n| 真实样本 | 用 `tests/data/result_001.zip` 调用 `extract_result` | 13 页 / 156 块 / 20 图（以 README 实测为准）；无磁盘写入 |\n| 限额路径 | 构造超大 manifest / 图片 / 成员数 | 分别抛对应 `ResultExtractionLimitError`，无部分结果 |\n| 可观测性 | 检查日志与指标 | `outcome`、`resource`、`category`、`correlation_id` 齐全；无正文泄漏 |"
+        }
+      ],
+      "rationale": "The smoke table lists unit regression, property tests, real-sample extraction, limit paths and observability, each with steps/commands and observed metrics.",
+      "missing": ""
+    },
+    {
+      "id": "rollout.rollback_trigger",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "6.4 回滚与熔断",
+          "quote": "**触发条件（可观测数字）**：\n\n- 提取器单测或性质测试失败数 $\\ge 1$。\n- 真实样本解析失败率连续 10 分钟 > 1%。\n- 单次调用峰值内存超过 240 MiB 的 150%（即 > 360 MiB），出现 $\\ge 1$ 次。\n- 信息泄漏哨兵测试失败 $\\ge 1$ 次。"
+        }
+      ],
+      "rationale": "Rollback triggers are observable numbers: >=1 failing unit/property tests, >1% real-sample failure for 10 minutes, >360 MiB peak memory, and >=1 sentinel-test failure.",
+      "missing": ""
+    },
+    {
+      "id": "rollout.rollback_steps",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "6.4 回滚与熔断",
+          "quote": "**回滚步骤**：\n\n1. yank 当前版本；通知使用者固定到上一稳定版本。\n2. 回退发布提交；重新打上一版本标签。\n3. 恢复 `max_total_image_bytes` / `max_manifest_bytes` / Schema 版本；重跑 `tests/test_extractor.py` 与 `tests/test_extractor_property.py`。\n4. 用真实样本复跑，确认页数 / 块数 / 图片数与 README 基线一致后解除熔断。"
+        }
+      ],
+      "rationale": "Four executable steps are given: yank the release, revert the release commit/tag, restore limit and Schema versions and rerun both test suites, then re-run the real sample against the README baseline.",
+      "missing": ""
+    },
+    {
+      "id": "alts.status_quo",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "- **思路**：调用方直接打开 ZIP，取第一个匹配的 manifest，解压到临时目录，再读图片。\n- **成本**：manifest 定位不一致；Schema 错误延迟到业务深处；图片路径与排序不确定；解压后资源不可控。\n- **风险**：压缩炸弹、路径穿越、错误页 ZIP 被当成正常结果、磁盘残留；每个调用方重复实现。\n- **触发阈值**：当第二个调用方开始复制同一段 ZIP 解析与限额代码时，Status Quo 的成本已超过收敛成本。"
+        }
+      ],
+      "rationale": "Section 7.1 describes the direct zipfile + json.loads + extractall status quo with its costs, risks and a trigger threshold.",
+      "missing": ""
+    },
+    {
+      "id": "alts.rejected",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "- **思路**：把解压交给外部命令或 `extractall`。\n- **优点**：实现简单。\n- **淘汰原因**：会落盘、无法在解压前做成员数与路径校验、无法保证“失败不返回部分结果”；与“纯内存、无磁盘 IO”的约束直接冲突。"
+        },
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "- **思路**：按需读取 manifest 与图片，降低峰值内存。\n- **优点**：内存更低，适合超大结果包。\n- **淘汰原因**：会改变返回契约——“失败不返回部分结果”与“整份一次性载入”两条前提都要重写；当前默认限额已能把峰值控制在 240 MiB，收益不足以抵消契约复杂度。留作 Q-20。"
+        },
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "- **思路**：绕开 `zipfile`，自行解析本地头、CRC 与加密，获得真实解压长度。\n- **优点**：彻底消除 `file_size` 静默截断风险。\n- **淘汰原因**：约 100–150 行实现 + 对应测试，收益仅覆盖敌意归档这一残余风险；当前已通过输出契约把使用前校验责任转移给下游。待安全评审提出明确需求后再评估（Q-19）。"
+        }
+      ],
+      "rationale": "Three rejected alternatives (extractall, lazy loading, self-built ZIP parser) each state idea, advantages and a rejection reason tied to the current memory-only, fail-closed and maintenance constraints.",
+      "missing": ""
+    },
+    {
+      "id": "alts.matrix",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "| 维度 | Status Quo | `extractall` | 懒加载 | 自建 ZIP 解析 | 选定方案 |\n| :--- | :--- | :--- | :--- | :--- | :--- |\n| 内存可控 | 差 | 差 | 强 | 中 | 强 |\n| 路径与成员安全 | 差 | 差 | 中 | 强 | 强 |\n| 失败不返回部分结果 | 差 | 差 | 弱 | 中 | 强 |\n| 实现与维护成本 | 低（重复） | 低 | 高 | 高 | 中 |\n| 与现有 Schema / 管道兼容 | 中 | 中 | 弱 | 中 | 强 |\n| 契合当前阶段 | 否 | 否 | 否 | 否 | **是** |"
+        }
+      ],
+      "rationale": "The trade-off matrix compares Status Quo, extractall, lazy loading, a custom ZIP parser and the chosen solution across memory control, path safety, no-partial-result behaviour, maintenance cost and Schema/pipeline compatibility.",
+      "missing": ""
+    },
+    {
+      "id": "alts.consistency",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "**选定方案**：`zipfile` 只读 + 顶层唯一 manifest + Pydantic `TypeAdapter` + 有界读取与显式限额 + 普通 dict 输出。"
+        },
+        {
+          "section": "7. 替代方案与权衡",
+          "quote": "结论：选定方案与 G1 ~ G6 一致；最关键约束是“纯内存、失败关闭、限额可推导”，这三项决定了不能使用 `extractall`，也不值得在本期自建 ZIP 解析。"
+        }
+      ],
+      "rationale": "The conclusion names the chosen shape and states it is consistent with G1-G6, with the three constraints that rule out extractall and in-cycle custom ZIP parsing.",
+      "missing": ""
+    },
+    {
+      "id": "x.goals_trace",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "- **G1 - 统一入口与结果契约（架构级）**：`extract_result(stream) -> ExtractedResult` 是唯一入口；每次返回新的 `{pages, images}`，失败不返回部分结果。验收：AC-1.1 ~ AC-1.11。\n- **G2 - manifest 唯一发现与 Schema 校验（可靠性级）**：只在 ZIP 顶层定位唯一 `*_content_list_v2.json`；缺失或多份均失败关闭；Pydantic 校验携带字段路径且不泄漏正文。验收：AC-2.1 ~ AC-3.10。\n- **G3 - 图片提取与路径规则（架构级）**：提取顶层 `images/` 全部常规文件；canonical path、去重、字典序排序；公开 `canonicalize_member_path`。验收：AC-4.1 ~ AC-4.14。\n- **G4 - 资源限额与错误分类（性能 / 可靠性级）**：默认 manifest 16 MiB、单图 32 MiB、总图片 160 MiB、图片 10,000 张、成员 100,000；超限不返回部分结果。验收：AC-5.1 ~ AC-6.9。\n- **G5 - 流生命周期、遥测与可测试性（运维级）**：不关闭调用方流、成功 / 失败后恢复游标；日志 / 指标统一出口；纯函数、无网络、可用内存 ZIP 测试。验收：AC-7.1 ~ AC-7.7。\n- **G6 - 共享根异常与公开路径规则（架构级）**：`ResultExtractionError` 继承 `MinerUParserError` 且与其他失败家族互不继承；`canonicalize_member_path` 对外可用。验收：AC-6.1、AC-1.11、AC-4.13。"
+        },
+        {
+          "section": "全文",
+          "quote": "| `extract_result` | `extract_result(stream: BinaryIO, *, limits: ExtractionLimits \\| None = None, on_metric: MetricHook \\| None = None, correlation_id: str \\| None = None) -> ExtractedResult` | 同步纯函数；成功返回新 dict；失败不返回部分结果 |"
+        },
+        {
+          "section": "全文",
+          "quote": "\n- **AC-5.1**: 打开流或解析中央目录时出现 `zipfile.BadZipFile` 或 `OSError` → `ResultExtractionArchiveError(reason=\"invalid_zip\")`。空流、HTTP 错误页、非 ZIP 内容都映射到该错误。（`zipfile.LargeZipFile` 是写路径专属异常，读取路径不会出现，见 AC-3.2 注。）\n- **AC-5.2**: `ExtractionLimits` 默认值必须为：`max_manifest_bytes = 16 MiB`（16,777,216）、`max_image_bytes = 32 MiB`（33,554,432）、`max_total_image_bytes = 160 MiB`（167,772,160）、`max_images = 10_000`、`max_members = 100_000`。`DEFAULT_EXTRACTION_LIMITS` 必须暴露具有这些值的实例。\n  > 默认值必须与 §4.3 的**端到端资源预算**自洽：给定并发度 $W$ 与每进程内存上限 $M$，需满足 $W \\times \\big(\\texttt{max\\_total\\_image\\_bytes} + \\texttt{max\\_manifest\\_bytes} \\times (1 + k_{\\text{model}}) + M_{\\text{zipinfo}} + M_{\\text{result}}\\big) \\le M$。当前默认值按 $W = 4$、$M = 1\\,\\text{GiB}$、$k_{\\text{model}} = 1$、$M_{\\text{zipinfo}} = 40\\,\\text{MiB}$（10 万成员）、$M_{\\text{result}} = 8\\,\\text{MiB}$ 推导，单次调用峰值约 **240 MiB**，$W = 4$ 时约 960 MiB。**因此单次调用的峰值内存上限必须写入 README**；$k_{\\text{model}}$ 由 R-3 标定后若大于 1，须按 $X \\le 192 - 16\\,k_{\\text{model}}$ MiB 下调 `max_total_image_bytes`（$k_{\\text{model}} = 1$ 时上界为 176 MiB，当前取值 160 MiB 留有余量）；超出该形态的部署用 `ExtractionLimits` 覆盖 `max_total_image_bytes`。"
+        },
+        {
+          "section": "全文",
+          "quote": "  `MinerUParserError` 是**新增的库级公共根异常**，直接继承 `Exception`。`MinerUError` 与 `ResultDownloadError` 必须在保持各自现有继承关系与捕获语义不变的前提下，改为**同时**继承 `MinerUParserError`——这是纯加性变更，既有 `except MinerUError` / `except ResultDownloadError` 的行为不受影响。三条失败路径因此**互不继承**（`ResultExtractionError` 不是 `MinerUError` 的子类，反之亦然），但共享公共根，调用方可用 `except MinerUParserError` 一次性捕获全库失败。"
+        },
+        {
+          "section": "全文",
+          "quote": "- **AC-6.5**: 遥测名称必须为：成功日志 `mineru.extract`；失败日志 `mineru.extract.error`；指标回调失败日志 `mineru.metric.failed`；游标恢复失败日志 `mineru.extract.restore_failed`。指标必须为：`mineru.extract.total`、`mineru.extract.duration_ms`、`mineru.extract.pages`、`mineru.extract.images`、`mineru.extract.image_bytes`。"
+        },
+        {
+          "section": "全文",
+          "quote": "- **AC-7.6**: 必须包含基于 Hypothesis 的**性质测试**：对任意字节串与任意合法 `ExtractionLimits`，`extract_result` 要么抛出 `ResultExtractionError`，要么返回满足全部不变式的结果——`images[].path` 均已 canonical 化、互不重复、按字典序升序，`len(images[].bytes)` 等于对应成员的中央目录声明大小，`pages` 为 Pydantic 模型实例的嵌套列表，且任何路径都**不得产生部分结果、不得写入磁盘**。"
+        }
+      ],
+      "rationale": "Each goal traces to later design: G1 to the extract_result signature, G4 to the limit table/AC-5.2, G5 to telemetry and the Hypothesis property test, G6 to the shared-root exception section.",
+      "missing": ""
+    },
+    {
+      "id": "x.nfr_arch",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "部署侧必须满足 $W \\times M_{\\text{peak}} \\le M_{\\text{container}}$。当前默认形态：$W=4$、$M_{\\text{container}}=1$ GiB、$k_{\\text{model}}=1$（待标定）、$M_{\\text{zipinfo}}=40$ MiB、$M_{\\text{result}}=8$ MiB，代入得 $M_{\\text{peak}} \\approx 240$ MiB，$4 \\times 240 = 960$ MiB ≤ 1 GiB。若 $k_{\\text{model}} > 1$，须按 $X \\le 192 - 16k$ MiB 下调 `max_total_image_bytes`。"
+        },
+        {
+          "section": "全文",
+          "quote": "  > 默认值必须与 §4.3 的**端到端资源预算**自洽：给定并发度 $W$ 与每进程内存上限 $M$，需满足 $W \\times \\big(\\texttt{max\\_total\\_image\\_bytes} + \\texttt{max\\_manifest\\_bytes} \\times (1 + k_{\\text{model}}) + M_{\\text{zipinfo}} + M_{\\text{result}}\\big) \\le M$。当前默认值按 $W = 4$、$M = 1\\,\\text{GiB}$、$k_{\\text{model}} = 1$、$M_{\\text{zipinfo}} = 40\\,\\text{MiB}$（10 万成员）、$M_{\\text{result}} = 8\\,\\text{MiB}$ 推导，单次调用峰值约 **240 MiB**，$W = 4$ 时约 960 MiB。**因此单次调用的峰值内存上限必须写入 README**；$k_{\\text{model}}$ 由 R-3 标定后若大于 1，须按 $X \\le 192 - 16\\,k_{\\text{model}}$ MiB 下调 `max_total_image_bytes`（$k_{\\text{model}} = 1$ 时上界为 176 MiB，当前取值 160 MiB 留有余量）；超出该形态的部署用 `ExtractionLimits` 覆盖 `max_total_image_bytes`。"
+        },
+        {
+          "section": "全文",
+          "quote": "- **AC-5.9**: **成员数量必须在构造 `ZipFile` 之前预检**：从流尾部读取 End-Of-Central-Directory (EOCD) 记录并计算**条目数上界**，超过 `max_members` 时立即抛出 `ResultExtractionLimitError(resource=\"member_count\", limit=..., actual=上界)`，不得先构造 `ZipFile` 再拒绝。预检必须满足：(a) 只读流尾部（末尾 64 KiB 窗口），不改变调用方游标语义；(b) 解析结果必须自洽校验（EOCD 签名、EOCD 定长部分必须结束于窗口尾部、归档注释长度与窗口尾部一致、单盘归档），否则视为不可信并**跳过预检**；(c) 条目数上界必须按 §4.5.2 的**公式**计算，**不得**只依赖 EOCD 的 16 位计数字段——该字段上限为 65534，条目数 ≥ 65535 时写 `0xFFFF`（ZIP64 标记），在默认 `max_members = 100_000` 下只数该字段的预检**永远不可能触发拒绝**，而超大成员数归档必然走 ZIP64 路径；(d) 后置检查（`len(infolist()) > max_members`）必须始终保留，两者是\"前置快速拒绝 + 后置兜底\"的关系。"
+        },
+        {
+          "section": "全文",
+          "quote": "- **资源边界**：有界读取 + 解压后限额 + 成员数预检，避免压缩炸弹与中央目录内存放大。验收：AC-5.1 ~ AC-5.10。"
+        }
+      ],
+      "rationale": "The NFR budget formula matches the limit defaults, the security section repeats bounded reads and the member pre-check, and the no-disk/no-copy NFR matches the read-only zipfile design.",
+      "missing": ""
+    },
+    {
+      "id": "x.rollback_release",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "1. **Phase 1（候选）**：发布 `0.1.0rcN`；在真实 `tests/data/result_001.zip` 与 80 个提取器测试函数（76 个主测试 + 4 个性质测试）上验证；观察 7 天。\n2. **Phase 2（正式）**：无 P0/P1 问题后发布 `0.1.0`。\n3. **观察期**：发布后 14 天；资源超限或安全回归按 6.4 回滚。"
+        },
+        {
+          "section": "全文",
+          "quote": "**触发条件（可观测数字）**：\n\n- 提取器单测或性质测试失败数 $\\ge 1$。\n- 真实样本解析失败率连续 10 分钟 > 1%。\n- 单次调用峰值内存超过 240 MiB 的 150%（即 > 360 MiB），出现 $\\ge 1$ 次。\n- 信息泄漏哨兵测试失败 $\\ge 1$ 次。"
+        },
+        {
+          "section": "全文",
+          "quote": "**回滚步骤**：\n\n1. yank 当前版本；通知使用者固定到上一稳定版本。\n2. 回退发布提交；重新打上一版本标签。\n3. 恢复 `max_total_image_bytes` / `max_manifest_bytes` / Schema 版本；重跑 `tests/test_extractor.py` 与 `tests/test_extractor_property.py`。\n4. 用真实样本复跑，确认页数 / 块数 / 图片数与 README 基线一致后解除熔断。"
+        }
+      ],
+      "rationale": "Rollback triggers and steps align with the rcN -> 0.1.0 release and the observation window, and the rollback reruns the same test suites listed in the smoke checklist.",
+      "missing": ""
+    },
+    {
+      "id": "x.no_placeholders",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "**证据（度量）**：2026-10-21 用最小真实结果包核对，ZIP 共 7 个成员（`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`）。manifest 4,803 B，1 页、6 个块（TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；图片 1 张、13,936 B。该样本确认了“根目录 manifest + 根 `images/`”布局，也暴露了原默认 `max_total_image_bytes=256 MiB` 与 1 GiB 容器、$W=4$ 的部署形态不自洽：同一形态下峰值约 1,272 MiB，超过容器上限；据此下调为 160 MiB（见 §4.3 与 Q-23）。"
+        },
+        {
+          "section": "全文",
+          "quote": "部署侧必须满足 $W \\times M_{\\text{peak}} \\le M_{\\text{container}}$。当前默认形态：$W=4$、$M_{\\text{container}}=1$ GiB、$k_{\\text{model}}=1$（待标定）、$M_{\\text{zipinfo}}=40$ MiB、$M_{\\text{result}}=8$ MiB，代入得 $M_{\\text{peak}} \\approx 240$ MiB，$4 \\times 240 = 960$ MiB ≤ 1 GiB。若 $k_{\\text{model}} > 1$，须按 $X \\le 192 - 16k$ MiB 下调 `max_total_image_bytes`。"
+        }
+      ],
+      "rationale": "A full-text scan found no 无 / ... / 待补充 / TBD used as a substantive answer; ellipses occur only inside quoted runtime error-message examples and mathematical notation.",
+      "missing": ""
+    },
+    {
+      "id": "x.no_code",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "**公共 API（内部组件，行为契约仍成立）**"
+        },
+        {
+          "section": "全文",
+          "quote": "本节描述**控制流契约**：每个阶段做什么、用什么判据、失败时抛出什么。实现方式（函数划分、循环写法、内部数据结构）由实现者决定，本 Spec 不约束；判定细则见 §4.5.2（成员发现与路径规则）与 §4.6（校验、限额与错误分类），遥测字段见 §5.3。"
+        }
+      ],
+      "rationale": "No implementation code, test logs or incidental tracebacks are dumped; section 4.5.1 explicitly leaves function, loop and internal data-structure choices to the implementer, leaving only interface signatures and text pseudo-steps.",
+      "missing": ""
+    },
+    {
+      "id": "x.numbers_sourced",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "**证据（度量）**：2026-10-21 用最小真实结果包核对，ZIP 共 7 个成员（`<uuid>_content_list.json`、`<uuid>_content_list_v2.json`、`<uuid>_model.json`、`<uuid>_origin.pdf`、`full.md`、`layout.json`、`images/<sha256>.jpg`）。manifest 4,803 B，1 页、6 个块（TitleBlock ×1、ParagraphBlock ×4、ImageBlock ×1）；图片 1 张、13,936 B。该样本确认了“根目录 manifest + 根 `images/`”布局，也暴露了原默认 `max_total_image_bytes=256 MiB` 与 1 GiB 容器、$W=4$ 的部署形态不自洽：同一形态下峰值约 1,272 MiB，超过容器上限；据此下调为 160 MiB（见 §4.3 与 Q-23）。"
+        },
+        {
+          "section": "全文",
+          "quote": "部署侧必须满足 $W \\times M_{\\text{peak}} \\le M_{\\text{container}}$。当前默认形态：$W=4$、$M_{\\text{container}}=1$ GiB、$k_{\\text{model}}=1$（待标定）、$M_{\\text{zipinfo}}=40$ MiB、$M_{\\text{result}}=8$ MiB，代入得 $M_{\\text{peak}} \\approx 240$ MiB，$4 \\times 240 = 960$ MiB ≤ 1 GiB。若 $k_{\\text{model}} > 1$，须按 $X \\le 192 - 16k$ MiB 下调 `max_total_image_bytes`。"
+        },
+        {
+          "section": "全文",
+          "quote": "- **单次调用峰值内存**：约 240 MiB；$W=4$ 时约 960 MiB，不超过 1 GiB 容器。该数字为公式推导值，标 **[estimated]**（$k_{\\text{model}}$ 待 `tracemalloc` 标定后回写）。验收：`test_memory_bound_with_tracemalloc`。"
+        },
+        {
+          "section": "全文",
+          "quote": "库形态无法按流量比例灰度；以候选版与真实样本验证替代。[estimated] 观察窗口按当前维护者规模设定。"
+        }
+      ],
+      "rationale": "Key numbers have a source or derivation: the dated real-package measurement, the resource-budget formula, and [estimated] markers on the uncalibrated peak-memory and observation-window figures.",
+      "missing": ""
+    },
+    {
+      "id": "x.no_fabricated_refs",
+      "status": "scored",
+      "level": 2,
+      "evidence": [
+        {
+          "section": "全文",
+          "quote": "全局结构见 [全局架构](../../architecture/mineru-parser-architecture.md)（Approved）。提取器位于管道第 4 阶段，上游是下载器交付的内存 ZIP 流，下游是 `ParseResult.data`。"
+        },
+        {
+          "section": "全文",
+          "quote": "- **AC-1.8**: `extract_result`、`ExtractionLimits`、`DEFAULT_EXTRACTION_LIMITS`、`ExtractedResult`、`ExtractedImage`、`ExtractionIssue`、`canonicalize_member_path` 与全部 `ResultExtraction*Error` 必须可从私有实现包 `mineru_parser._extractor` 导入。顶层 `mineru_parser` 只保留 `ExtractedResult` / `ExtractedImage` / `ExtractionLimits`（`parse` 的签名 / 返回值所需类型）；其余名称不再由顶层导出（SPEC-004 AC-2.2 / AC-2.3）。"
+        },
+        {
+          "section": "全文",
+          "quote": "  > 该根异常定义在 `mineru_parser/errors.py`，由 `mineru_parser` 顶层导出。SPEC-001 / SPEC-002 的异常体系、AC 与 changelog **已同步回写**（见 SPEC-001 AC-6.7、SPEC-002 AC-8.10）。"
+        }
+      ],
+      "rationale": "No M<N> placeholders appear; depends_on points to the architecture doc referenced in chapter 3, and cross-spec citations (SPEC-001 AC-6.7, SPEC-002 AC-8.10, SPEC-004 AC-2.2/AC-2.3) are concrete and consistent with the declared companion specs.",
+      "missing": ""
+    }
+  ]
+}
