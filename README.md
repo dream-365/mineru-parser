@@ -1,5 +1,6 @@
 # mineru-parser
 
+[![CI](https://github.com/dream-365/mineru-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/dream-365/mineru-parser/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mineru-parser.svg)](https://pypi.org/project/mineru-parser/)
 [![Python](https://img.shields.io/pypi/pyversions/mineru-parser.svg)](https://pypi.org/project/mineru-parser/)
 
