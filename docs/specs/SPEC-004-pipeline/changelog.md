@@ -1,4 +1,27 @@
+---
+type: changelog
+status: In Review
+owner: jackafx
+depends_on: []
+updated_at: 2026-11-09
+---
+
 # Changelog: SPEC-004 Pipeline
+
+## [2026-11-09] - 规范形态迁移：8 章骨架、frontmatter、目录布局
+
+- **修改类型**: Changed
+- **影响范围**: 全文结构（目录、frontmatter、章节编号、元数据表、NFR、上线计划、替代方案）；移除过期的“计划测试映射”
+- **变更原因**: 旧版为扁平文件与 6 章模板，无法通过 mdstandards / taskscheck 的形态闸门；Goals 未带验收方式，缺少 NFR、上线与替代方案章节；§5 的 AC↔测试映射仍标注“计划”，与实际 `tests/test_pipeline.py` 不一致。
+- **具体内容**:
+  - 迁移为 `docs/specs/SPEC-004-pipeline/spec.md`，changelog 同目录。
+  - 补齐 frontmatter 与正文元数据表；`depends_on` 指向全局架构文档。
+  - 按 8 章骨架重排；Goals 收敛为 G1 ~ G5，每个 Goal 带验收方式与 AC 范围；Non-Goals 逐条标注 `本次不做` / `Deferred to Phase 2`。
+  - 1.2 补充可核实证据：README 记录的 2026-10-21 真实运行（37.5 s，等待 36.56 s）与顶层约 40 个导出名；补充压缩侧 + 解压侧合计约 290 MiB 的预算证据。
+  - 移除旧 §5 的任务拆分与“计划测试名”映射；实现状态由 changelog 记录，测试清单以 `tests/test_pipeline.py` 的实际测试为准。
+  - 编排、异常处理规则与遥测表保留原契约，仅调整章节编号与交叉引用。
+- **说明**: 契约（`parse` 签名、`ParseResult` / `ErrorMessage` 字段、阶段枚举、预算语义、双模式失败处理）未改变；仅调整文档形态与证据位置。
+- **状态**: In Review。
 
 ## [2026-10-21] - 实现落地：`parse` 门面、组件私有化与四阶段编排
 
