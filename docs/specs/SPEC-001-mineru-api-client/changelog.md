@@ -1,4 +1,28 @@
+---
+type: changelog
+status: Implemented
+owner: jackafx
+depends_on: []
+updated_at: 2026-11-09
+---
+
 # Changelog: SPEC-001 MinerUApiClient
+
+## [2026-11-09] - 规范形态迁移：8 章骨架、frontmatter、目录布局
+
+- **修改类型**: Changed
+- **影响范围**: 全文结构（目录、frontmatter、章节编号、元数据表、验收标准表、NFR、上线计划、替代方案）
+- **变更原因**: 旧版为扁平文件与 6 章模板，无法通过 mdstandards / taskscheck 的形态闸门；背景缺少可核实的痛点证据，Goals 未带验收方式，且缺少 NFR、上线与替代方案章节。
+- **具体内容**:
+  - 迁移为 `docs/specs/SPEC-001-mineru-api-client/spec.md`，changelog 同目录。
+  - 补齐 frontmatter（`type` / `status` / `owner` / `depends_on` / `updated_at`）与正文元数据表；`depends_on` 指向新建的全局架构文档。
+  - 按 8 章骨架重排：背景与上下文、目标与非目标、架构、详细设计、NFR、上线与迁移、替代方案、附录。
+  - 1.2 补充可核实的度量证据：README 记录的 2026-10-21 真实运行 37.5 s，其中等待阶段 36.56 s（97.5%）。
+  - Goals 收敛为 G1 ~ G5，每个 Goal 带验收方式与 AC 范围；Non-Goals 逐条标注 `本次不做` / `Deferred to Phase 2`。
+  - §3.4 的实现伪码改写为轮询契约条款与公式，不再保留具体实现代码。
+  - AC-6.7 的测试映射修正为 `test_error_hierarchy_and_common_root`（跨家族断言位于 `tests/test_extractor.py`）；AC-10.1 ~ 10.3 标注为**未实现**（无独立测试）。
+- **说明**: 契约（方法签名、状态归一化、错误映射、限额与判定规则）未改变；仅调整文档形态与证据位置。
+- **状态**: Implemented。
 
 ## [2026-10-21] - 引入库级公共根异常 `MinerUParserError`
 
